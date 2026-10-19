@@ -5,6 +5,7 @@ using Avalonia.Input;
 using Avalonia.VisualTree;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Threading;
 using Avalonia.Media;
 using BloodborneLauncher.Core;
 using FluentIcons.Avalonia;
@@ -160,7 +161,11 @@ namespace BloodborneLauncher.Views
                 if (!on) label.Opacity = 0.35;
                 item.PointerReleased += (_, e) =>
                 {
-                    if (e.InitialPressMouseButton == MouseButton.Left) Select(index, notify: true);
+                    if (e.InitialPressMouseButton != MouseButton.Left) return;
+                    // After this release is done with: the item holds the mouse until then, so a
+                    // dialog the choice opens (Settings > Layout) would get no clicks.
+                    e.Pointer.Capture(null);
+                    Dispatcher.UIThread.Post(() => Select(index, notify: true));
                 };
                 item.PointerEntered += (_, _) => { if (index != SelectedIndex) item.SetResourceReference(BackgroundProperty, "SidebarItemHoverBrush"); };
                 item.PointerExited += (_, _) => { if (index != SelectedIndex) item.Background = Brushes.Transparent; };
@@ -397,7 +402,18 @@ namespace BloodborneLauncher.Views
             var card = Add(Card(icon, title, hint, box, out note), into);
             box.SelectedIndex = Choices.IndexOf(choices, get());
             ShowNote(box.SelectedIndex);
-            box.SelectionChanged += (_, _) => { if (box.SelectedIndex >= 0) Picked(box.SelectedIndex); };
+            // After the click is done with (the dropdown's item holds the mouse until then, so a dialog
+            // the choice opens would get no clicks), and only for a new choice: a setting that puts
+            // its old value back (cancelled) changes the selection too.
+            box.SelectionChanged += (_, _) =>
+            {
+                var index = box.SelectedIndex;
+                if (index < 0) return;
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (box.SelectedIndex == index && choices[index].Value != get()) Picked(index);
+                });
+            };
             card.Tag = note;
             return box;
         }
