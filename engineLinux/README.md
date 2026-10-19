@@ -13,5 +13,6 @@ BB_GAME_DIR=/path/to/CUSA03173 bash run.sh
 ```
 
 Build packages on Arch: `vulkan-headers boost robin-map spirv-cross zydis spirv-headers miniz nlohmann-json
-miniupnpc sdl3 ffmpeg glslang xxhash cmake ninja`. `bash packaging/appimage.sh` does all of this and
-makes the AppImage.
+miniupnpc sdl3 ffmpeg glslang xxhash cmake ninja`, and `ccache` for quicker rebuilds (used when installed).
+`bash packaging/appimage.sh` does all of this and makes the AppImage; `bash packaging/container.sh` does it in
+an Ubuntu 24.04 container, as the releases are built.

@@ -107,6 +107,27 @@ namespace BloodborneLauncher.Core
         /// "keep"), or null when none is on.</summary>
         public static string? ResolutionPatchChoice { get; set; }
 
+        /// <summary>Linux: MangoHud is installed, its Vulkan layer (MangoHud*.json) where the Vulkan
+        /// loader looks for implicit layers.</summary>
+        public static bool MangoHudInstalled()
+        {
+            if (OperatingSystem.IsWindows()) return false;
+            static string Env(string name, string fallback) =>
+                Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : fallback;
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var roots = new List<string>
+            {
+                Env("XDG_CONFIG_HOME", Path.Combine(home, ".config")),
+                Env("XDG_DATA_HOME", Path.Combine(home, ".local", "share")),
+                "/etc",
+            };
+            roots.AddRange(Env("XDG_CONFIG_DIRS", "/etc/xdg").Split(':'));
+            roots.AddRange(Env("XDG_DATA_DIRS", "/usr/local/share:/usr/share").Split(':'));
+            return roots.Where(r => r.Length > 0)
+                .Select(r => Path.Combine(r, "vulkan", "implicit_layer.d"))
+                .Any(d => Directory.Exists(d) && Directory.EnumerateFiles(d, "MangoHud*.json").Any());
+        }
+
         public static Dictionary<string, string> Build(LauncherSettings s)
         {
             var fps = Fps(s);
@@ -142,6 +163,8 @@ namespace BloodborneLauncher.Core
             if (s.Bool("audio_stats")) env["BB_AUDIO_STATS"] = "1";
             if (s.Bool("load_profile")) env["BB_SAMPLE_THREADS"] = "load";
             if (s.Bool("fsr4_balanced")) env["BB_FSR4_BALANCED"] = "1";
+            // Linux: MangoHud's overlay, through its Vulkan layer (which MANGOHUD=1 turns on).
+            if (!OperatingSystem.IsWindows() && s.Bool("mangohud") && MangoHudInstalled()) env["MANGOHUD"] = "1";
             // Experimental engine features: on by default, each can be turned off.
             env["BB_PRECISE_PACING"] = s.Bool("exp_frame_pacing") ? "1" : "0";
             env["BB_IMAGE_WRITEBACK_GC"] = s.Bool("exp_vram_cleanup") ? "1" : "0";

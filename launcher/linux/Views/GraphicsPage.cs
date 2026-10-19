@@ -40,7 +40,7 @@ namespace BloodborneLauncher.Views
             _sharpnessCard = (SettingRow)Body.Children[^1];
 
             IniToggle(Symbol.ArrowMove, "Object motion vectors", "Less ghosting on characters; costs about 10% FPS", "object_motion");
-            IniToggle(Symbol.DataUsage, "Show FPS", null, "show_fps");
+            var counter = new List<ToggleSwitch> { IniToggle(Symbol.DataUsage, "Show FPS", null, "show_fps") };
             // What the counter shows (on unless turned off).
             foreach (var (icon, key, title) in new[]
                      {
@@ -53,9 +53,28 @@ namespace BloodborneLauncher.Views
             {
                 // CPU and GPU use are off unless chosen (the engine's defaults, bbport_settings.h).
                 var fallback = key is "show_fps_cpu" or "show_fps_gpu" ? "0" : "1";
-                ToggleRow(icon, title, "Shown in the FPS counter", () => Ini.Get(key, fallback) == "1", v => Ini.Set(key, v ? "1" : "0"));
+                counter.Add(ToggleRow(icon, title, "Shown in the FPS counter", () => Ini.Get(key, fallback) == "1", v => Ini.Set(key, v ? "1" : "0")));
                 Body.Children[^1].Margin = new Thickness(24, 0, 0, 4);
             }
+
+            // MangoHud (its Vulkan layer) in place of the counter above: that one is turned off while
+            // MangoHud is on, and back on when it is turned off.
+            var mangohud = GameEnvironment.MangoHudInstalled();
+            var useMangoHud = ToggleRow(Symbol.DataArea, "Use MangoHud instead",
+                mangohud
+                    ? "MangoHud's overlay in place of the counter above (Right Shift + F12 shows or hides it). Its settings are in ~/.config/MangoHud/MangoHud.conf. Applies at the next start"
+                    : "Install MangoHud (the mangohud package of your distribution) to use its overlay instead",
+                () => S.Bool("mangohud"),
+                v =>
+                {
+                    S.Set("mangohud", v);
+                    Ini.Set("show_fps", v ? "0" : "1");
+                    counter[0].IsChecked = !v;
+                },
+                changed: () => counter.ForEach(t => t.IsEnabled = !S.Bool("mangohud")));
+            // Not installed: it can only be turned off (when it was on).
+            useMangoHud.IsEnabled = mangohud || S.Bool("mangohud");
+            counter.ForEach(t => t.IsEnabled = !(mangohud && S.Bool("mangohud")));
 
             // Linux: NVIDIA's DLSS runtime from the public DLSS SDK (tools/fetch_dlss.sh in the engine).
             _dlssDownload = SmallButton("Download", Symbol.ArrowDownload, async (_, _) => await DownloadDlssAsync());

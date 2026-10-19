@@ -38,7 +38,7 @@ namespace BloodborneLauncher.Core
 
         public sealed record Release(Version Version, int Beta, string Tag, string Name, string Notes, string Page,
             string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize, DateTime Published = default,
-            string? AppImageUrl = null, long AppImageSize = 0)
+            string? AppImageUrl = null, long AppImageSize = 0, string? ZsyncUrl = null)
         {
             public bool IsNewerThan(Version version, int beta) => Compare(Version, Beta, version, beta) > 0;
             public bool IsCurrent => Compare(Version, Beta, Current, CurrentBeta) == 0;
@@ -164,7 +164,7 @@ namespace BloodborneLauncher.Core
             if (!TryVersion(tag, out var version, out var betaNumber))
                 return null;
 
-            string? exe = null, zip = null, package = null, appimage = null;
+            string? exe = null, zip = null, package = null, appimage = null, zsync = null;
             long exeSize = 0, zipSize = 0, appimageSize = 0;
             foreach (var asset in root.GetProperty("assets").EnumerateArray())
             {
@@ -180,6 +180,8 @@ namespace BloodborneLauncher.Core
                     package = url;
                 else if (name.EndsWith(".AppImage", StringComparison.OrdinalIgnoreCase) && appimage == null)
                     (appimage, appimageSize) = (url, size);
+                else if (name.EndsWith(".AppImage.zsync", StringComparison.OrdinalIgnoreCase) && zsync == null)
+                    zsync = url;
             }
             return new Release(version, betaNumber, tag,
                 root.TryGetProperty("name", out var n) && n.GetString() is { Length: > 0 } title ? title : tag,
@@ -189,7 +191,7 @@ namespace BloodborneLauncher.Core
                 DateTime.TryParse(p.GetString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var when)
                     ? when.ToLocalTime()
                     : default,
-                appimage, appimageSize);
+                appimage, appimageSize, zsync);
         }
 
         /// <summary>Reads "v0.9.7", "0.9.7-beta.2" or "0.9.7-beta2+abc123"; <paramref name="beta"/> is 0 for a stable build.</summary>
@@ -239,9 +241,6 @@ namespace BloodborneLauncher.Core
             return remote != null ? remote != LocalEngine() : LocalEngine() == null && release.ExeUrl == null;
         }
 
-        /// <summary>Downloads the update, puts it in place and starts the new launcher; the caller then exits.
-        /// Returns the package files that could not be put in place and were left as they were (only
-        /// optional ones: see <see cref="Optional"/>).</summary>
         /// <summary>The .AppImage file this launcher runs from (Linux), or null for a build from the repository.</summary>
         public static string? SelfAppImage =>
             Environment.GetEnvironmentVariable("APPIMAGE") is { Length: > 0 } path && File.Exists(path) ? path : null;
@@ -251,6 +250,9 @@ namespace BloodborneLauncher.Core
         public static bool CanInstallAppImage(Release release) =>
             !OperatingSystem.IsWindows() && release.AppImageUrl != null && SelfAppImage != null;
 
+        /// <summary>Downloads the update, puts it in place and starts the new launcher; the caller then exits.
+        /// Returns the package files that could not be put in place and were left as they were (only
+        /// optional ones: see <see cref="Optional"/>).</summary>
         public static async Task<IReadOnlyList<string>> InstallAsync(Release release, bool package, IProgress<double>? progress = null)
         {
             if (!OperatingSystem.IsWindows())
@@ -300,9 +302,11 @@ namespace BloodborneLauncher.Core
         }
 
         /// <summary>
-        /// Linux: the release's AppImage in place of this one, then started. It is downloaded beside
-        /// this one (one rename puts it in place, on the same disk), checked to be an AppImage, and
-        /// renamed over it: this launcher keeps running from what it had mounted until it closes.
+        /// Linux: the release's AppImage in place of this one, then started. It is made beside this one
+        /// (one rename puts it in place, on the same disk), checked, and renamed over it: this launcher
+        /// keeps running from what it had mounted until it closes. With the release's .zsync, only the
+        /// parts this AppImage does not have are downloaded (see <see cref="Zsync"/>), and the result is
+        /// checked against its SHA-1; without it, or when that fails, the whole file is.
         /// </summary>
         [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
         private static async Task InstallAppImageAsync(Release release, IProgress<double>? progress)
@@ -316,7 +320,28 @@ namespace BloodborneLauncher.Core
             var download = self + ".new";
             try
             {
-                await DownloadAsync(url, download, release.AppImageSize, progress);
+                Zsync.Control? control = null;
+                var built = false;
+                if (release.ZsyncUrl != null)
+                {
+                    try
+                    {
+                        using var http = Client(TimeSpan.FromMinutes(30));
+                        control = Zsync.Parse(await http.GetByteArrayAsync(release.ZsyncUrl));
+                        built = await Zsync.BuildAsync(http, control, url, self, download, progress);
+                    }
+                    catch (Exception e) when (e is HttpRequestException or IOException or InvalidDataException or FormatException or OverflowException
+                                                  or TaskCanceledException or UnauthorizedAccessException)
+                    {
+                        // The whole file instead.
+                    }
+                }
+                if (!built)
+                {
+                    await DownloadAsync(url, download, release.AppImageSize, progress);
+                    if (control != null && !Zsync.Matches(download, control))
+                        throw new InvalidOperationException("The download is damaged (its SHA-1 is not the release's). Try again.");
+                }
                 var head = new byte[11];
                 using (var file = File.OpenRead(download))
                     file.ReadExactly(head);

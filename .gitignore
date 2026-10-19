@@ -11,3 +11,6 @@ launcher/windows/install.txt
 
 # The Linux engine, made by engineLinux/setup.sh
 engineLinux/bloodborne_pc/
+
+# packaging/container.sh: its engine, ccache and NuGet packages
+/build/

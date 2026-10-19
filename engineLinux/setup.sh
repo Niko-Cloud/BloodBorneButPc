@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Makes the Linux engine in engineLinux/bloodborne_pc (or the folder given): DarkIzuku's engine at
-# v0.4.0-darkizuku-preview.1, Awakenchan's engine/bbhost-changes.patch as the Windows build takes it,
-# the files that patch turns to CRLF line endings back to LF (bash and Python refuse CRLF), then
-# linux-changes.patch from this folder. Build it with its build.sh, or let packaging/appimage.sh.
+# v0.4.0-darkizuku-preview.1 (that tag's commit: a tag can be moved, a commit cannot), Awakenchan's
+# engine/bbhost-changes.patch as the Windows build takes it, the files that patch turns to CRLF line
+# endings back to LF (bash and Python refuse CRLF), then linux-changes.patch from this folder. Build
+# it with its build.sh, or let packaging/appimage.sh.
 #
 #   bash engineLinux/setup.sh [folder]
 set -euo pipefail
@@ -11,8 +12,11 @@ repo=$(dirname -- "$here")
 dest=${1:-$here/bloodborne_pc}
 [[ ! -e $dest ]] || { echo "$dest already exists: remove it to set it up again" >&2; exit 1; }
 
-git clone --branch v0.4.0-darkizuku-preview.1 --recurse-submodules https://github.com/DarkIzuku/bloodborne_pc "$dest"
+commit=8ecba9a4abdd54747e31d7fee54982e422b5f8e2 # v0.4.0-darkizuku-preview.1
+git clone --no-checkout https://github.com/DarkIzuku/bloodborne_pc "$dest"
 cd -- "$dest"
+git checkout --quiet --detach "$commit"
+git submodule update --init --recursive
 git apply "$repo/engine/bbhost-changes.patch"
 cp "$repo/engine/win_compat.h" gpu/
 

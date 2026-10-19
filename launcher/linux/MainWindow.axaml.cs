@@ -89,13 +89,13 @@ namespace BloodborneLauncher
                         ? $"Bloodborne Launcher ready. Engine: {Paths.PortDir}"
                         : "Bloodborne Launcher ready. Choose the engine folder in Settings.",
                     Paths.IsPortDir(Paths.PortDir) ? LogLevel.Good : LogLevel.Warn);
-                // --test-update <url>: installs the AppImage at url over $APPIMAGE as an update would
-                // (no prompt), the outcome on standard output.
+                // --test-update <url> [zsync url]: installs the AppImage at url over $APPIMAGE as an
+                // update would (no prompt), the outcome on standard output.
                 if (Array.IndexOf(args, "--test-update") is var update and >= 0 && update + 1 < args.Length)
                     Dispatcher.UIThread.Post(async () =>
                     {
                         var release = new Updater.Release(new Version(99, 0, 0), 0, "v99.0.0", "Test", "", "", null, null, null, 0, 0,
-                            AppImageUrl: args[update + 1]);
+                            AppImageUrl: args[update + 1], ZsyncUrl: update + 2 < args.Length ? args[update + 2] : null);
                         try
                         {
                             await Updater.InstallAsync(release, package: false);
@@ -425,7 +425,9 @@ namespace BloodborneLauncher
             var body = $"You have {Updater.CurrentLabel}. " +
                        (package
                            ? $"{(chosen ? "This version has a different engine" : "This update includes a new engine")}, so the whole package is downloaded ({size / 1048576} MB) and replaced in place."
-                           : $"The launcher downloads {release.Tag} ({size / 1048576} MB), replaces itself and restarts.") +
+                           : !OperatingSystem.IsWindows() && release.ZsyncUrl != null
+                               ? $"The launcher downloads what changed in {release.Tag} (at most {size / 1048576} MB), replaces itself and restarts."
+                               : $"The launcher downloads {release.Tag} ({size / 1048576} MB), replaces itself and restarts.") +
                        " Your settings, saves, mods and profiles stay." +
                        (chosen && older
                            ? "\n\nThis is an older version: settings it doesn't know are kept but not used, and the launcher may offer the newest version again at start."

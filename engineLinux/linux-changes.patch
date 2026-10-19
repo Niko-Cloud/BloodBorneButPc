@@ -1,8 +1,8 @@
 diff --git a/build.sh b/build.sh
-index 2d70dff..8112e19 100644
+index 2d70dff..87f460e 100644
 --- a/build.sh
 +++ b/build.sh
-@@ -75,11 +75,14 @@ if [[ -e gpu/third_party/fsr-vulkan/.git ]]; then
+@@ -75,11 +75,19 @@ if [[ -e gpu/third_party/fsr-vulkan/.git ]]; then
      done
  fi
  # Line tables only (not full debug info): crash offsets still resolve to function and
@@ -17,10 +17,15 @@ index 2d70dff..8112e19 100644
 -            "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -gline-tables-only -DNDEBUG")
 +            "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 $line_tables -DNDEBUG"
 +            "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 $line_tables -DNDEBUG")
++# ccache, when installed (BB_CCACHE=0: not): a rebuild of the GPU library compiles only what
++# changed, also after out/ was removed or in another copy of the tree.
++if [[ ${BB_CCACHE:-1} != 0 ]] && command -v ccache >/dev/null; then
++    gpu_config+=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
++fi
  # Configured once per set of options (ninja itself reruns CMake when a CMakeLists.txt changes).
  if [[ ! -f out/gpu/build.ninja || $(cat out/gpu/bb-configure.txt 2>/dev/null) != "${gpu_config[*]}" ]]; then
      cmake -S gpu -B out/gpu "${gpu_config[@]}" >/dev/null
-@@ -93,7 +96,11 @@ if ! ninja -C out/gpu ${BB_JOBS:+-j "$BB_JOBS"} bbgpu bb-engine-assets > out/gpu
+@@ -93,7 +101,11 @@ if ! ninja -C out/gpu ${BB_JOBS:+-j "$BB_JOBS"} bbgpu bb-engine-assets > out/gpu
  fi
  cp -f out/gpu/bb-engine-assets* out/
  # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
@@ -33,7 +38,7 @@ index 2d70dff..8112e19 100644
  runtime=(src/runtime*.c)
  link=(-no-pie)
  if [[ -n $windows ]]; then
-@@ -132,10 +139,11 @@ else
+@@ -132,10 +144,11 @@ else
  "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" "${link[@]}" -o out/bb-probe
  echo "Built $PWD/out/bb-probe"
  # GPU and controller inventory; keep the Windows C dialect and include SDL headers.

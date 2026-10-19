@@ -57,6 +57,7 @@ namespace BloodborneLauncher.Core
             ["update_channel"] = "", // empty: beta builds follow beta, others stable
             ["ui_layout"] = "modern",
             ["fsr4_balanced"] = false,
+            ["mangohud"] = false, // Linux: MangoHud's overlay in place of the game's FPS counter
             ["exp_vram_cleanup"] = true,
             ["exp_frame_pacing"] = false,
             ["exp_vram_budget"] = false,

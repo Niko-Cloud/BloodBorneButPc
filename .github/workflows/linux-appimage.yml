@@ -1,0 +1,68 @@
+name: Linux AppImage
+
+# Builds the AppImage with packaging/container.sh (the Ubuntu 24.04 build image, so it runs on any
+# 2024 or newer distribution and any x86-64 CPU) and attaches it and its .zsync to the release.
+# A pushed v* tag makes the release (a pre-release when the tag has -beta in it) and gives the
+# launcher the tag's version; started by hand, it builds a test AppImage, kept as the run's artifact.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build image, cached between runs (rebuilt when packaging/Dockerfile changes).
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: packaging
+          tags: bloodborne-pc-build
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ccache and the NuGet packages: the engine itself is set up fresh each time.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build/ccache
+            build/nuget
+          key: appimage-${{ github.run_id }}
+          restore-keys: appimage-
+
+      - name: Build
+        env:
+          BB_IMAGE: bloodborne-pc-build
+          BB_UPDATE_REPO: ${{ github.repository }}
+          CCACHE_MAXSIZE: 2G
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then export BB_VERSION=${GITHUB_REF_NAME#v}; fi
+          bash packaging/container.sh
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            pre=()
+            [[ $tag == *-beta* ]] && pre=(--prerelease)
+            gh release create "$tag" "${pre[@]}" --verify-tag --title "Bloodborne PC for Linux ${tag#v}" --generate-notes
+          fi
+          gh release upload "$tag" dist/BloodbornePC-x86_64.AppImage dist/BloodbornePC-x86_64.AppImage.zsync --clobber
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          name: BloodbornePC-x86_64.AppImage
+          path: |
+            dist/BloodbornePC-x86_64.AppImage
+            dist/BloodbornePC-x86_64.AppImage.zsync

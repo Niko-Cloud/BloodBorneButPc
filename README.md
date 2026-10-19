@@ -20,19 +20,32 @@ with a native Linux build: the engine built and run on Linux, and the launcher p
 
 1. Download `BloodbornePC-x86_64.AppImage` from [Releases](https://github.com/Niko-Cloud/BloodBorneButPc/releases).
 2. `chmod +x BloodbornePC-x86_64.AppImage` and run it (or double-click it).
-3. Pick your game folder on the Play page and press **Play**. The launcher offers new releases; **Update** installs them.
+3. Pick your game folder on the Play page and press **Play**. The launcher offers new releases; **Update** installs them,
+   downloading only what changed.
 
-It needs a Vulkan driver and Python 3, which gaming setups have. Settings, saves and mods are kept in
+It runs on 2024 and newer distributions (Ubuntu 24.04, Debian 13, Fedora 40, SteamOS 3.7, Arch and so on) and needs a
+Vulkan driver and Python 3, which gaming setups have. Settings, saves and mods are kept in
 `~/.local/share/bloodborne-pc`. For co-op behind a firewall (ufw is on by default on some distributions), allow
 the game's port once: `sudo ufw allow 3658/udp`.
 
-**Build the AppImage yourself:** install the engine's build packages ([engineLinux/README.md](engineLinux/README.md))
-and the .NET 10 SDK, then:
+**Build the AppImage yourself**, the way the releases are built (needs only Docker or Podman):
 
 ```bash
 git clone https://github.com/Niko-Cloud/BloodBorneButPc
 cd BloodBorneButPc
-bash packaging/appimage.sh   # sets up and builds the engine, then dist/BloodbornePC-x86_64.AppImage
+bash packaging/container.sh   # dist/BloodbornePC-x86_64.AppImage and its .zsync
+```
+
+It builds in an Ubuntu 24.04 container ([packaging/Dockerfile](packaging/Dockerfile)), so the AppImage runs on every
+distribution above and any x86-64 CPU. `bash packaging/appimage.sh` builds it on your own system instead (with the
+engine's build packages from [engineLinux/README.md](engineLinux/README.md) and the .NET 10 SDK): quicker to try,
+but it only runs on systems at least as new as yours.
+
+**Releases** are built by GitHub Actions ([.github/workflows/linux-appimage.yml](.github/workflows/linux-appimage.yml)):
+push a tag and the release with its AppImage follows.
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0   # v1.0.0-beta.1: a pre-release
 ```
 
 **Run from source** (for working on it):
