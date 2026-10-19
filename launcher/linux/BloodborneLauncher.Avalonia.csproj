@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The launcher on Linux: the Windows launcher's Core (settings, mods, trophies, saves, online,
+    the game process) compiled from launcher/windows as it is, with an Avalonia UI in place of
+    WPF. AVALONIA selects the few lines in Core that differ (the UI thread, keys, sound).
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>bloodborne-launcher</AssemblyName>
+    <RootNamespace>BloodborneLauncher</RootNamespace>
+    <DefineConstants>$(DefineConstants);AVALONIA</DefineConstants>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <Version>0.9.9</Version>
+    <ApplicationIcon>../windows/BloodborneLauncher/app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../windows/BloodborneLauncher/Core/*.cs" Link="Core/%(Filename)%(Extension)" />
+    <Compile Include="../windows/Shared/SourceStamp.cs" Link="Core/SourceStamp.cs" />
+  </ItemGroup>
+
+  <!-- The Dump game page: reading the player's own PKGs (third_party/LibOrbisPkg/README.md). -->
+  <ItemGroup>
+    <ProjectReference Include="../third_party/LibOrbisPkg/LibOrbisPkg.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="../windows/BloodborneLauncher/Assets/backdrop.jpg" Link="Assets/backdrop.jpg" />
+    <AvaloniaResource Include="../windows/BloodborneLauncher/app.ico" Link="Assets/app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+    <PackageReference Include="FluentIcons.Avalonia" Version="2.0.321" />
+    <!-- Screenshot mode: every page drawn off-screen, for checking the layout without a window. -->
+    <PackageReference Include="Avalonia.Headless" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Skia" Version="11.3.22" />
+  </ItemGroup>
+
+</Project>

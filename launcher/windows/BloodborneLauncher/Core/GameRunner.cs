@@ -7,7 +7,8 @@ namespace BloodborneLauncher.Core
     /// <summary>
     /// Starts and stops the game and streams its output. The Windows port's run.py does the
     /// preparation (mods, patches, the linked image) and starts bin\bb-probe.exe; packaged builds
-    /// run it inside Bloodborne.exe (--run). A custom command can replace it.
+    /// run it inside Bloodborne.exe (--run). A custom command can replace it. On Linux run.sh does
+    /// the same (through scripts/run_game.py, shared with Windows).
     /// </summary>
     public sealed class GameRunner
     {
@@ -44,6 +45,15 @@ namespace BloodborneLauncher.Core
             {
                 if (!Paths.IsPortDir(Paths.PortDir))
                     return "The engine folder is not set. Choose it in Settings › Bloodborne PC.";
+                if (!OperatingSystem.IsWindows())
+                {
+                    // run.sh: the Linux defaults, then scripts/run_game.py (prepare, patch, start).
+                    info = new ProcessStartInfo("bash");
+                    info.ArgumentList.Add(Path.Combine(Paths.PortDir, "run.sh"));
+                    info.ArgumentList.Add("--game-dir");
+                    info.ArgumentList.Add(GameEnvironment.GameDir(s));
+                    return Launch(info, s);
+                }
                 // The package's own Python runs the engine's run_windows.py (prepare, patch, start).
                 var python = File.Exists(Paths.Python) ? Paths.Python : "py";
                 info = new ProcessStartInfo(python);
@@ -52,7 +62,11 @@ namespace BloodborneLauncher.Core
                 info.ArgumentList.Add("--game-dir");
                 info.ArgumentList.Add(GameEnvironment.GameDir(s));
             }
+            return Launch(info, s);
+        }
 
+        private string? Launch(ProcessStartInfo info, LauncherSettings s)
+        {
             info.WorkingDirectory = Paths.IsPortDir(Paths.PortDir) ? Paths.PortDir : Environment.CurrentDirectory;
             foreach (var (key, value) in GameEnvironment.Build(s))
                 info.Environment[key] = value;
@@ -138,11 +152,20 @@ namespace BloodborneLauncher.Core
             if (process == null)
                 return;
 
-            foreach (var probe in Process.GetProcessesByName("bb-probe"))
+            if (OperatingSystem.IsWindows())
             {
-                try { probe.CloseMainWindow(); } catch { /* no window */ }
+                foreach (var probe in Process.GetProcessesByName("bb-probe"))
+                {
+                    try { probe.CloseMainWindow(); } catch { /* no window */ }
+                }
+                try { process.CloseMainWindow(); } catch { /* no window */ }
             }
-            try { process.CloseMainWindow(); } catch { /* no window */ }
+            else
+            {
+                // SIGTERM to run_game.py: it passes it on to bb-probe and removes the mods overlay
+                // once the game has ended.
+                try { Terminate(process.Id, 15); } catch { /* already gone */ }
+            }
 
             await Task.WhenAny(process.WaitForExitAsync(), Task.Delay(3000));
             if (!process.HasExited)
@@ -150,5 +173,8 @@ namespace BloodborneLauncher.Core
                 try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
             }
         }
+
+        [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+        private static extern int Terminate(int pid, int signal);
     }
 }

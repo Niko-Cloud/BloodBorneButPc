@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace BloodborneLauncher.Core
 {
     /// <summary>
-    /// The engine's own SDL3 (out\SDL3.dll in the package), used to see controllers exactly as the
+    /// The engine's own SDL3 (out\SDL3.dll in the package; libSDL3.so.0 on Linux), used to see controllers exactly as the
     /// game does: the same names, the same button mapping (gamecontrollerdb.txt included) and the
     /// same button names for pad.* lines. Only used while the game is not running, so the two
     /// never hold a pad at the same time.
@@ -56,9 +56,19 @@ namespace BloodborneLauncher.Core
             if (_loaded || _failed) return _loaded;
             try
             {
-                var dll = Path.Combine(Paths.BinariesDir, "SDL3.dll");
-                if (!File.Exists(dll)) { _failed = true; return false; }
-                var lib = NativeLibrary.Load(dll);
+                IntPtr lib;
+                if (OperatingSystem.IsWindows())
+                {
+                    var dll = Path.Combine(Paths.BinariesDir, "SDL3.dll");
+                    if (!File.Exists(dll)) { _failed = true; return false; }
+                    lib = NativeLibrary.Load(dll);
+                }
+                // Linux: the system's SDL3, the one the engine links against.
+                else if (!NativeLibrary.TryLoad("libSDL3.so.0", out lib))
+                {
+                    _failed = true;
+                    return false;
+                }
                 T Get<T>(string name) where T : Delegate => Marshal.GetDelegateForFunctionPointer<T>(NativeLibrary.GetExport(lib, name));
                 _setHint = Get<SetHintFn>("SDL_SetHint");
                 _init = Get<InitFn>("SDL_InitSubSystem");

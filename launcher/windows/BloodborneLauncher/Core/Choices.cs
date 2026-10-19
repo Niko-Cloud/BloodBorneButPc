@@ -214,7 +214,7 @@
 
         public static readonly Choice[] LaunchMethods =
         {
-            new("Bloodborne PC engine", "windows", "Prepares mods and patches, then starts the engine (out\\bb-probe.exe)"),
+            new("Bloodborne PC engine", "windows", $"Prepares mods and patches, then starts the engine (out{System.IO.Path.DirectorySeparatorChar}{Paths.EngineExe})"),
             new("Custom command", "custom", "Runs a program of your choice with the settings as environment variables"),
         };
 

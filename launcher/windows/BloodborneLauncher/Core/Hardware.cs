@@ -39,8 +39,10 @@ namespace BloodborneLauncher.Core
         private static Hardware? _detected;
         public static Hardware Detect() => _detected ??= Probe();
 
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416", Justification = "Linux returns before the registry")]
         private static Hardware Probe()
         {
+            if (!OperatingSystem.IsWindows()) return ProbeLinux();
             var (gpu, vendor, vram) = DetectGpu();
             var cpu = "CPU";
             try
@@ -57,6 +59,7 @@ namespace BloodborneLauncher.Core
             return new Hardware(gpu, vendor, vram, cpu, Environment.ProcessorCount, ram, w, h, Math.Max(hz, 1));
         }
 
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
         private static (string Name, string Vendor, long Vram) DetectGpu()
         {
             var best = ("GPU", "", 0L);
@@ -89,6 +92,99 @@ namespace BloodborneLauncher.Core
             return best;
         }
 
+        // ---------------------------------------------------------------- Linux
+
+        /// <summary>The GPU from sysfs and lspci (nvidia-smi for an NVIDIA card's memory), the CPU from
+        /// /proc/cpuinfo, the display's current mode from xrandr (X11 or XWayland).</summary>
+        private static Hardware ProbeLinux()
+        {
+            var (gpu, vendor, vram) = DetectGpuLinux();
+            var cpu = "CPU";
+            try
+            {
+                var line = File.ReadLines("/proc/cpuinfo").FirstOrDefault(l => l.StartsWith("model name", StringComparison.Ordinal));
+                if (line?.Split(':', 2) is [_, var name] && name.Trim().Length > 0) cpu = name.Trim();
+            }
+            catch { /* unreadable: "CPU" */ }
+            var ram = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            var (w, h, hz) = DisplayModeLinux();
+            return new Hardware(gpu, vendor, vram, cpu, Environment.ProcessorCount, ram, w, h, Math.Max(hz, 1));
+        }
+
+        private static (string Name, string Vendor, long Vram) DetectGpuLinux()
+        {
+            var best = ("GPU", "", 0L);
+            try
+            {
+                foreach (var card in Directory.GetDirectories("/sys/class/drm", "card*"))
+                {
+                    var device = Path.Combine(card, "device");
+                    if (Path.GetFileName(card).Contains('-') || !File.Exists(Path.Combine(device, "vendor"))) continue;
+                    var id = File.ReadAllText(Path.Combine(device, "vendor")).Trim().ToLowerInvariant();
+                    var vendor = id switch { "0x10de" => "NVIDIA", "0x1002" => "AMD", "0x8086" => "Intel", _ => "" };
+                    var slot = Path.GetFileName(Path.GetFullPath(new DirectoryInfo(device).ResolveLinkTarget(true)?.FullName ?? device));
+                    var name = Run("lspci", "-mm", "-s", slot) is { } row && System.Text.RegularExpressions.Regex.Matches(row, "\"([^\"]*)\"") is { Count: >= 3 } fields
+                        ? CleanGpuName(fields[1].Groups[1].Value, fields[2].Groups[1].Value)
+                        : vendor.Length > 0 ? vendor + " GPU" : "GPU";
+                    long memory = 0;
+                    var vramFile = Path.Combine(device, "mem_info_vram_total"); // amdgpu
+                    if (File.Exists(vramFile) && long.TryParse(File.ReadAllText(vramFile).Trim(), out var bytes)) memory = bytes;
+                    if (vendor == "NVIDIA" && Run("nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits") is { } smi &&
+                        smi.Split('\n')[0].Split(',') is [var smiName, var mib] && long.TryParse(mib.Trim(), out var total))
+                        (name, memory) = (smiName.Trim(), total << 20);
+                    if (memory > best.Item3 || best.Item1 == "GPU") best = (name, vendor, memory);
+                }
+            }
+            catch { /* no sysfs access: unknown GPU */ }
+            return best;
+        }
+
+        /// <summary>"NVIDIA Corporation" + "GB206 [GeForce RTX 5060 Ti]" -> "NVIDIA GeForce RTX 5060 Ti".</summary>
+        private static string CleanGpuName(string vendor, string device)
+        {
+            var bracket = System.Text.RegularExpressions.Regex.Match(device, "\\[([^\\]]+)\\]");
+            var model = bracket.Success ? bracket.Groups[1].Value : device;
+            var brand = vendor.Split(' ')[0];
+            brand = brand.StartsWith("Advanced", StringComparison.Ordinal) ? "AMD" : brand;
+            return model.StartsWith(brand, StringComparison.OrdinalIgnoreCase) ? model : $"{brand} {model}";
+        }
+
+        /// <summary>The primary display's current mode ("2560x1440 ... 165.00*+" in xrandr), or unknown.</summary>
+        private static (int W, int H, int Hz) DisplayModeLinux()
+        {
+            if (Run("xrandr", "--current") is not { } text) return (0, 0, 60);
+            var lines = text.Split('\n');
+            var start = Array.FindIndex(lines, l => l.Contains(" connected primary"));
+            if (start < 0) start = Array.FindIndex(lines, l => l.Contains(" connected"));
+            if (start < 0) return (0, 0, 60);
+            foreach (var line in lines.Skip(start + 1).TakeWhile(l => l.StartsWith(' ')))
+            {
+                var mode = System.Text.RegularExpressions.Regex.Match(line, @"^\s+(\d+)x(\d+)\S*\s.*?([\d.]+)\*");
+                if (mode.Success)
+                    return (int.Parse(mode.Groups[1].Value), int.Parse(mode.Groups[2].Value),
+                        (int)Math.Round(double.Parse(mode.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture)));
+            }
+            return (0, 0, 60);
+        }
+
+        /// <summary>A program's output, or null when it is missing or fails.</summary>
+        private static string? Run(string program, params string[] arguments)
+        {
+            try
+            {
+                var info = new System.Diagnostics.ProcessStartInfo(program) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+                foreach (var argument in arguments) info.ArgumentList.Add(argument);
+                using var process = System.Diagnostics.Process.Start(info);
+                if (process == null) return null;
+                var output = process.StandardOutput.ReadToEnd();
+                return process.WaitForExit(3000) && process.ExitCode == 0 ? output : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         // ---------------------------------------------------------------- recommendation
 
         /// <summary>What would change to suit this PC; empty when the settings already do.</summary>
@@ -109,7 +205,7 @@ namespace BloodborneLauncher.Core
             }
 
             var tier = GpuTier;
-            var dlss = File.Exists(Path.Combine(Paths.BinariesDir, "nvngx_dlss.dll"));
+            var dlss = Paths.DlssLibrary != null;
             Ini("Upscaler", "upscaler", Rtx && dlss ? "dlss" : Rdna4 ? "fsr4" : "fsr3", Choices.Upscalers);
 
             // The output: the display's own size, by name where it is one of the choices, else

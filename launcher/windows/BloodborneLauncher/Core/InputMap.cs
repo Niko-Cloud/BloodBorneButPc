@@ -1,6 +1,10 @@
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+#if AVALONIA
+using Avalonia.Input;
+#else
 using System.Windows.Input;
+#endif
 
 namespace BloodborneLauncher.Core
 {
@@ -232,6 +236,8 @@ namespace BloodborneLauncher.Core
         public static List<Pad> Detect()
         {
             var pads = new List<Pad>();
+            // Windows' HID device list; elsewhere SDL (SdlPad) is the only source.
+            if (!OperatingSystem.IsWindows()) return pads;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var path in HidPaths())
             {

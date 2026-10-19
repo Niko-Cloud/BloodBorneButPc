@@ -1,0 +1,232 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ic="using:FluentIcons.Avalonia"
+        xmlns:local="using:BloodborneLauncher"
+        xmlns:views="using:BloodborneLauncher.Views"
+        x:Class="BloodborneLauncher.MainWindow"
+        x:DataType="local:MainWindow"
+        Title="Bloodborne Launcher"
+        Icon="avares://bloodborne-launcher/Assets/app.ico"
+        Width="1040" Height="780" MinWidth="820" MinHeight="560"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource WindowBaseBrush}">
+    <!--
+        As the Windows launcher's MainWindow.xaml: a tool bar with the page's name and the Play
+        button, tabs (Modern) or a source-list sidebar (Classic), the page, a folding activity log
+        and a one-line status bar. The desktop draws the title bar (Linux has no client-side
+        caption to extend into), and dialogs are drawn over everything in DialogHost.
+    -->
+    <Panel>
+        <Panel IsHitTestVisible="False" ClipToBounds="True">
+            <!-- Glass (Modern): the game's own artwork, blurred and darkened, behind the frosted panes. -->
+            <Image x:Name="BackdropImage" Stretch="UniformToFill" Margin="-60" IsVisible="False" />
+            <Rectangle x:Name="BackdropShade" IsVisible="False">
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                        <GradientStop Color="#590A0B0E" Offset="0" />
+                        <GradientStop Color="#800A0B0E" Offset="0.5" />
+                        <GradientStop Color="#B30A0B0E" Offset="1" />
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
+        </Panel>
+
+        <Grid RowDefinitions="38,*,Auto,Auto">
+            <!-- ==================== Tool bar ==================== -->
+            <Border Grid.Row="0" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+                <Grid>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
+                        <TextBlock Text="Bloodborne Launcher" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock x:Name="TitlePage" FontSize="12" Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0" Spacing="6">
+                        <Button x:Name="TitleUpdate" Classes="TitleIcon" Click="TitleUpdate_Click" IsVisible="False"
+                                BorderBrush="{DynamicResource GoodTextBrush}" BorderThickness="1"
+                                ToolTip.Tip="A new launcher version is available">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <ic:SymbolIcon Symbol="ArrowDownload" FontSize="13" Foreground="{DynamicResource GoodTextBrush}" />
+                                <TextBlock x:Name="TitleUpdateText" Text="Update" FontSize="11.5" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="TitlePlay" Classes="TitleIcon" Click="TitlePlay_Click"
+                                Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                ToolTip.Tip="Start the game">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <ic:SymbolIcon x:Name="TitlePlayIcon" Symbol="Play" FontSize="13"
+                                               Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}" />
+                                <TextBlock x:Name="TitlePlayText" Text="Play" FontSize="11.5" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="TitleIcon" Click="ToggleLog_Click" ToolTip.Tip="Activity">
+                            <ic:SymbolIcon Symbol="Pulse" FontSize="14" />
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- ==================== Tabs (Modern) or sidebar (Classic) + page ==================== -->
+            <Grid Grid.Row="1" Background="{DynamicResource ContentAreaBrush}" ColumnDefinitions="Auto,*" RowDefinitions="Auto,*">
+                <!-- Classic: the source-list sidebar. -->
+                <Border x:Name="Sidebar" Grid.Column="0" Grid.RowSpan="2" Width="196" IsVisible="False"
+                        Background="{DynamicResource WindowBaseBrush}"
+                        BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+                    <DockPanel Margin="0,16,0,10">
+                        <RadioButton DockPanel.Dock="Bottom" GroupName="Classic" Classes="Side"
+                                     Tag="{x:Type views:SettingsPage}" IsCheckedChanged="NavItem_Checked">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <ic:SymbolIcon Symbol="Settings" FontSize="13" />
+                                <TextBlock Text="Settings" />
+                            </StackPanel>
+                        </RadioButton>
+                        <StackPanel>
+                            <TextBlock Text="GAME" Classes="SidebarHeader" />
+                            <RadioButton x:Name="ClassicPlay" GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:PlayPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="Play" FontSize="13" />
+                                    <TextBlock Text="Play" />
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:DisplayPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="Desktop" FontSize="13" />
+                                    <TextBlock Text="Display" />
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:GraphicsPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="Sparkle" FontSize="13" />
+                                    <TextBlock Text="Graphics" />
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="ClassicControls" GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:ControlsPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="XboxController" FontSize="13" />
+                                    <TextBlock Text="Controls" />
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:TrophiesPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="Trophy" FontSize="13" />
+                                    <TextBlock Text="Trophies" />
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="ClassicMods" GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:ModsPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="PuzzlePiece" FontSize="13" />
+                                    <TextBlock Text="Mods &amp; patches" />
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="ClassicOnline" GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:OnlinePage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="Globe" FontSize="13" />
+                                    <TextBlock Text="Online" />
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="ClassicDump" GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:DumpPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="Box" FontSize="13" />
+                                    <TextBlock Text="Dump game" />
+                                </StackPanel>
+                            </RadioButton>
+                            <TextBlock Text="SYSTEM" Classes="SidebarHeader" Margin="18,18,0,6" />
+                            <RadioButton x:Name="ClassicOutput" GroupName="Classic" Classes="Side"
+                                         Tag="{x:Type views:OutputPage}" IsCheckedChanged="NavItem_Checked">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ic:SymbolIcon Symbol="WindowConsole" FontSize="13" />
+                                    <TextBlock Text="Game output" />
+                                </StackPanel>
+                            </RadioButton>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+
+                <!-- Modern: tabs across the top. -->
+                <Border x:Name="TabStrip" Grid.Column="1" Grid.Row="0" HorizontalAlignment="Center" Margin="0,12,0,4" Padding="4"
+                        CornerRadius="20" Background="{DynamicResource PillTrackBrush}"
+                        BorderBrush="{DynamicResource GlassPaneStrokeBrush}" BorderThickness="1">
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton x:Name="PlayItem" GroupName="Pages" Classes="Tab" Content="Play"
+                                     Tag="{x:Type views:PlayPage}" IsCheckedChanged="NavItem_Checked" />
+                        <RadioButton GroupName="Pages" Classes="Tab" Content="Display"
+                                     Tag="{x:Type views:DisplayPage}" IsCheckedChanged="NavItem_Checked" />
+                        <RadioButton GroupName="Pages" Classes="Tab" Content="Graphics"
+                                     Tag="{x:Type views:GraphicsPage}" IsCheckedChanged="NavItem_Checked" />
+                        <RadioButton x:Name="ControlsItem" GroupName="Pages" Classes="Tab" Content="Controls"
+                                     Tag="{x:Type views:ControlsPage}" IsCheckedChanged="NavItem_Checked" />
+                        <RadioButton GroupName="Pages" Classes="Tab" Content="Trophies"
+                                     Tag="{x:Type views:TrophiesPage}" IsCheckedChanged="NavItem_Checked" />
+                        <RadioButton x:Name="MoreItem" GroupName="Pages" Classes="Tab" Content="More"
+                                     Tag="{x:Type views:MorePage}" IsCheckedChanged="NavItem_Checked" />
+                    </StackPanel>
+                </Border>
+
+                <ContentControl x:Name="PageHost" Grid.Column="1" Grid.Row="1" />
+            </Grid>
+
+            <!-- ==================== Activity log (folded by default) ==================== -->
+            <Border x:Name="LogPanel" Grid.Row="2" Height="140" IsVisible="False"
+                    Background="{DynamicResource PanelDeepBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
+                <Panel>
+                    <ScrollViewer x:Name="LogScroller" VerticalScrollBarVisibility="Auto" Padding="16,8,48,8">
+                        <ItemsControl x:Name="LogList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="local:LogItem">
+                                    <Grid Margin="0,1" ColumnDefinitions="Auto,*">
+                                        <TextBlock Grid.Column="0" Text="{Binding Time}" FontFamily="{DynamicResource MonoFont}" FontSize="11"
+                                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}" Margin="0,0,10,0" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Message}" FontFamily="{DynamicResource MonoFont}" FontSize="11.5"
+                                                   Foreground="{Binding Color}" TextWrapping="Wrap" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <Button Classes="TitleIcon" HorizontalAlignment="Right" VerticalAlignment="Top"
+                            Margin="0,6,14,0" Click="ClearLog_Click" ToolTip.Tip="Clear activity">
+                        <ic:SymbolIcon Symbol="Broom" FontSize="13" />
+                    </Button>
+                </Panel>
+            </Border>
+
+            <!-- ==================== Status bar ==================== -->
+            <Border Grid.Row="3" Height="24" Cursor="Hand" PointerReleased="StatusBar_Click"
+                    Background="{DynamicResource PillTrackBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0"
+                    ToolTip.Tip="Show or hide activity">
+                <Grid Margin="12,0" ColumnDefinitions="*,Auto">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse x:Name="StatusDot" Width="5" Height="5" VerticalAlignment="Center" Fill="{DynamicResource StatusDotIdleBrush}" />
+                        <TextBlock x:Name="StatusText" Text="Ready" FontSize="10.5" Margin="8,0,0,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}" TextTrimming="CharacterEllipsis" MaxWidth="620" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock x:Name="SavedText" FontSize="10.5" Margin="0,0,12,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                        <TextBlock x:Name="LogCount" FontSize="10.5" Margin="0,0,12,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                        <TextBlock x:Name="VersionText" FontSize="10.5" VerticalAlignment="Center" FontFamily="{DynamicResource MonoFont}"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Dialogs (Prompt) over everything. -->
+        <Panel x:Name="DialogHostPanel" />
+    </Panel>
+</Window>

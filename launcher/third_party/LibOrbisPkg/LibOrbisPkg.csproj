@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    LibOrbisPkg (https://github.com/maxton/LibOrbisPkg, LGPL-3.0, commit 6434772) for the
+    launcher's Dump page: reading fake PKGs and their PFS images. The sources of its
+    LibOrbisPkg.Core project as they are, with one change in PFS/PFSCReader.cs (see README.md).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>LibOrbisPkg</RootNamespace>
+    <LangVersion>7.3</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);CORE</DefineConstants>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Nullable>disable</Nullable>
+    <!-- Upstream code as it is: obsolete crypto classes and unused fields. -->
+    <NoWarn>$(NoWarn);SYSLIB0021;SYSLIB0022;SYSLIB0023;SYSLIB0045;CS0168;CS0169;CS0219;CS0414;CS0649</NoWarn>
+  </PropertyGroup>
+
+</Project>

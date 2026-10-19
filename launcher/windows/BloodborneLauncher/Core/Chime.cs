@@ -1,5 +1,7 @@
 using System.IO;
+#if !AVALONIA
 using System.Media;
+#endif
 
 namespace BloodborneLauncher.Core
 {
@@ -15,6 +17,30 @@ namespace BloodborneLauncher.Core
         {
             try
             {
+#if AVALONIA
+                // No SoundPlayer: the desktop's own player (PipeWire, PulseAudio or ALSA) plays a file.
+                var file = customFile;
+                if (file.Length == 0 || !File.Exists(file))
+                {
+                    file = Path.Combine(Path.GetTempPath(), "bbport-trophy.wav");
+                    File.WriteAllBytes(file, Wave(Math.Clamp(volumePercent, 0, 100) / 100.0));
+                }
+                foreach (var player in new[] { "pw-play", "paplay", "aplay" })
+                {
+                    try
+                    {
+                        var info = new System.Diagnostics.ProcessStartInfo(player) { UseShellExecute = false };
+                        if (player == "aplay") info.ArgumentList.Add("-q");
+                        info.ArgumentList.Add(file);
+                        System.Diagnostics.Process.Start(info)?.Dispose();
+                        return;
+                    }
+                    catch (System.ComponentModel.Win32Exception)
+                    {
+                        // Not installed: the next one.
+                    }
+                }
+#else
                 if (customFile.Length > 0 && File.Exists(customFile))
                 {
                     new SoundPlayer(customFile).Play();
@@ -22,6 +48,7 @@ namespace BloodborneLauncher.Core
                 }
                 var player = new SoundPlayer(new MemoryStream(Wave(Math.Clamp(volumePercent, 0, 100) / 100.0)));
                 player.Play();
+#endif
             }
             catch
             {

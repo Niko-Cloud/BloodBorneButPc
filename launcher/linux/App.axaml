@@ -1,0 +1,17 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="BloodborneLauncher.App"
+             RequestedThemeVariant="Dark">
+    <Application.Resources>
+        <ResourceDictionary>
+            <!-- Charcoal first; the Modern layout merges Glass.axaml over it at start (MainWindow). -->
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceInclude Source="avares://bloodborne-launcher/Themes/Charcoal.axaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+    <Application.Styles>
+        <FluentTheme />
+        <StyleInclude Source="avares://bloodborne-launcher/Themes/Styles.axaml" />
+    </Application.Styles>
+</Application>

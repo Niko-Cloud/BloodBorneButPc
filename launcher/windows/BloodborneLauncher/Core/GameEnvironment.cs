@@ -128,6 +128,8 @@ namespace BloodborneLauncher.Core
                 ["BB_FPS_LIMIT"] = fps == "uncap" ? "0" : fps,
                 ["BB_VBLANK_HZ"] = fps switch { "90" => "90", "30" or "60" => "60", _ => "0" },
                 ["PYTHONUNBUFFERED"] = "1",
+                // Trophy notifications are the launcher's (Workspace): the engine only records them.
+                ["BB_TROPHY_NOTIFY"] = "0",
             };
             // The Play page's DLC switch: off, the game is told no add-ons are installed.
             if (!s.Bool("dlc_enabled")) env["BB_DLC"] = "0";

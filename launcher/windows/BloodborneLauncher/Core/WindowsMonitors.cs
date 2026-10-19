@@ -16,6 +16,8 @@ namespace BloodborneLauncher.Core
         public static List<Monitor> All()
         {
             var result = new List<Monitor>();
+            // Windows only: elsewhere the game opens on the display the desktop gives it.
+            if (!OperatingSystem.IsWindows()) return result;
             var previousDpi = SetThreadDpiAwarenessContext(new IntPtr(-4));
             try
             {

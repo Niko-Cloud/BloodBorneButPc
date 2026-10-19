@@ -56,8 +56,12 @@ namespace BloodborneLauncher.Core
         }
 
         /// <summary>What to tell the player when the game may not fit, else null.</summary>
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416", Justification = "Linux returns before the registry")]
         public static string? Problem(IniFile ini)
         {
+            // Linux reserves the pool without counting it against memory (pages are taken as the
+            // game uses them), so the start cannot fail this way there.
+            if (!OperatingSystem.IsWindows()) return null;
             var status = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
             if (!GlobalMemoryStatusEx(ref status)) return null;
             var (managed, maxPageFileMiB) = PageFile();
@@ -88,6 +92,7 @@ namespace BloodborneLauncher.Core
         /// <summary>Whether Windows manages the page file size, else the configured maximum in MiB
         /// (0: off). HKLM\...\Memory Management\PagingFiles: "?:\pagefile.sys" (automatic),
         /// "C:\pagefile.sys 0 0" (system managed), "C:\pagefile.sys 4096 8192" (fixed).</summary>
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
         private static (bool Managed, long MaxMiB) PageFile()
         {
             try

@@ -22,7 +22,9 @@ namespace BloodborneLauncher.Core
     /// </summary>
     public static class Updater
     {
-        public const string Repository = "Awakenchan/BloodBorneButPc";
+        /// <summary>Where releases come from: Awakenchan's (the Windows package) on Windows, the Linux
+        /// port's (the AppImage) elsewhere.</summary>
+        public static string Repository => OperatingSystem.IsWindows() ? "Awakenchan/BloodBorneButPc" : "Niko-Cloud/BloodBorneButPc";
         public static string ReleasesPage => $"https://github.com/{Repository}/releases";
 
         /// <summary>The engine build this launcher is made for (package.json "engine").</summary>
@@ -35,7 +37,8 @@ namespace BloodborneLauncher.Core
         private static readonly string[] Kept = { "bbport.ini", "mods.json", "patches.json", "user", "mods", "logs", "network", "engine-assets" };
 
         public sealed record Release(Version Version, int Beta, string Tag, string Name, string Notes, string Page,
-            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize, DateTime Published = default)
+            string? ExeUrl, string? ZipUrl, string? PackageUrl, long ExeSize, long ZipSize, DateTime Published = default,
+            string? AppImageUrl = null, long AppImageSize = 0)
         {
             public bool IsNewerThan(Version version, int beta) => Compare(Version, Beta, version, beta) > 0;
             public bool IsCurrent => Compare(Version, Beta, Current, CurrentBeta) == 0;
@@ -161,8 +164,8 @@ namespace BloodborneLauncher.Core
             if (!TryVersion(tag, out var version, out var betaNumber))
                 return null;
 
-            string? exe = null, zip = null, package = null;
-            long exeSize = 0, zipSize = 0;
+            string? exe = null, zip = null, package = null, appimage = null;
+            long exeSize = 0, zipSize = 0, appimageSize = 0;
             foreach (var asset in root.GetProperty("assets").EnumerateArray())
             {
                 var name = asset.GetProperty("name").GetString() ?? "";
@@ -175,6 +178,8 @@ namespace BloodborneLauncher.Core
                     (zip, zipSize) = (url, size);
                 else if (name.Equals(PackageFile, StringComparison.OrdinalIgnoreCase))
                     package = url;
+                else if (name.EndsWith(".AppImage", StringComparison.OrdinalIgnoreCase) && appimage == null)
+                    (appimage, appimageSize) = (url, size);
             }
             return new Release(version, betaNumber, tag,
                 root.TryGetProperty("name", out var n) && n.GetString() is { Length: > 0 } title ? title : tag,
@@ -183,7 +188,8 @@ namespace BloodborneLauncher.Core
                 root.TryGetProperty("published_at", out var p) && p.ValueKind == JsonValueKind.String &&
                 DateTime.TryParse(p.GetString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var when)
                     ? when.ToLocalTime()
-                    : default);
+                    : default,
+                appimage, appimageSize);
         }
 
         /// <summary>Reads "v0.9.7", "0.9.7-beta.2" or "0.9.7-beta2+abc123"; <paramref name="beta"/> is 0 for a stable build.</summary>
@@ -236,8 +242,22 @@ namespace BloodborneLauncher.Core
         /// <summary>Downloads the update, puts it in place and starts the new launcher; the caller then exits.
         /// Returns the package files that could not be put in place and were left as they were (only
         /// optional ones: see <see cref="Optional"/>).</summary>
+        /// <summary>The .AppImage file this launcher runs from (Linux), or null for a build from the repository.</summary>
+        public static string? SelfAppImage =>
+            Environment.GetEnvironmentVariable("APPIMAGE") is { Length: > 0 } path && File.Exists(path) ? path : null;
+
+        /// <summary>Whether this launcher can install the release itself on Linux: it is an AppImage and
+        /// the release has one attached.</summary>
+        public static bool CanInstallAppImage(Release release) =>
+            !OperatingSystem.IsWindows() && release.AppImageUrl != null && SelfAppImage != null;
+
         public static async Task<IReadOnlyList<string>> InstallAsync(Release release, bool package, IProgress<double>? progress = null)
         {
+            if (!OperatingSystem.IsWindows())
+            {
+                await InstallAppImageAsync(release, progress);
+                return Array.Empty<string>();
+            }
             var self = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot tell where this launcher is.");
             var folder = Path.GetDirectoryName(self)!;
             // A folder of its own each time: one an antivirus still holds a file in (from an earlier
@@ -277,6 +297,42 @@ namespace BloodborneLauncher.Core
             }
             Process.Start(new ProcessStartInfo(self) { UseShellExecute = true, WorkingDirectory = folder });
             return skipped;
+        }
+
+        /// <summary>
+        /// Linux: the release's AppImage in place of this one, then started. It is downloaded beside
+        /// this one (one rename puts it in place, on the same disk), checked to be an AppImage, and
+        /// renamed over it: this launcher keeps running from what it had mounted until it closes.
+        /// </summary>
+        [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+        private static async Task InstallAppImageAsync(Release release, IProgress<double>? progress)
+        {
+            var self = SelfAppImage ?? throw new InvalidOperationException(
+                "This launcher was built from the repository, not installed as the AppImage: update it with git pull and build it again.");
+            var url = release.AppImageUrl ?? throw new InvalidOperationException("This release has no AppImage attached.");
+            // The game runs from this AppImage's files, which go away when it closes.
+            if (Process.GetProcessesByName("bb-probe").Length > 0)
+                throw new InvalidOperationException("Close the game first: it runs from this AppImage.");
+            var download = self + ".new";
+            try
+            {
+                await DownloadAsync(url, download, release.AppImageSize, progress);
+                var head = new byte[11];
+                using (var file = File.OpenRead(download))
+                    file.ReadExactly(head);
+                // An ELF with the AppImage type 2 mark ("AI" 2 at offset 8).
+                if (head[0] != 0x7F || head[1] != (byte)'E' || head[2] != (byte)'L' || head[3] != (byte)'F' ||
+                    head[8] != (byte)'A' || head[9] != (byte)'I' || head[10] != 2)
+                    throw new InvalidOperationException("The download is not an AppImage.");
+                File.SetUnixFileMode(download, File.GetUnixFileMode(self) | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+                File.Move(download, self, overwrite: true);
+            }
+            catch
+            {
+                try { File.Delete(download); } catch (Exception) { }
+                throw;
+            }
+            Process.Start(new ProcessStartInfo(self) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(self)! })?.Dispose();
         }
 
         /// <summary>Package folders the game runs without: a file there an antivirus will not let

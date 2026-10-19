@@ -1,0 +1,1876 @@
+diff --git a/build.sh b/build.sh
+index 2d70dff..8112e19 100644
+--- a/build.sh
++++ b/build.sh
+@@ -75,11 +75,14 @@ if [[ -e gpu/third_party/fsr-vulkan/.git ]]; then
+     done
+ fi
+ # Line tables only (not full debug info): crash offsets still resolve to function and
+-# file:line with llvm-symbolizer, and compiling and linking take much less time.
++# file:line with llvm-symbolizer, and compiling and linking take much less time. GCC (the
++# Linux default) has no -gline-tables-only; -g1 is its nearest level.
++line_tables=-gline-tables-only
++if ! "$CC" --version 2>/dev/null | grep -qi clang; then line_tables=-g1; fi
+ gpu_config=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" -DBB_LTO="${BB_LTO:-ON}"
+             -DBB_PGO_DIR="$PWD/pgo" -DBB_MARCH="${BB_MARCH:-}"
+-            "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -gline-tables-only -DNDEBUG"
+-            "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -gline-tables-only -DNDEBUG")
++            "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 $line_tables -DNDEBUG"
++            "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 $line_tables -DNDEBUG")
+ # Configured once per set of options (ninja itself reruns CMake when a CMakeLists.txt changes).
+ if [[ ! -f out/gpu/build.ninja || $(cat out/gpu/bb-configure.txt 2>/dev/null) != "${gpu_config[*]}" ]]; then
+     cmake -S gpu -B out/gpu "${gpu_config[@]}" >/dev/null
+@@ -93,7 +96,11 @@ if ! ninja -C out/gpu ${BB_JOBS:+-j "$BB_JOBS"} bbgpu bb-engine-assets > out/gpu
+ fi
+ cp -f out/gpu/bb-engine-assets* out/
+ # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
+-gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
++# $ORIGIN/../lib: the libraries a package bundles (the AppImage, packaging/appimage.sh in the
++# launcher's repository; absent in a build tree). An RPATH, not a RUNPATH, so it also serves
++# libbbgpu.so's and the bundled libraries' own dependencies (patchelf breaks this non-PIE binary).
++packaged=(-Wl,-rpath,'$ORIGIN/../lib' -Wl,--disable-new-dtags)
++gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" "${packaged[@]}" -rdynamic)
+ runtime=(src/runtime*.c)
+ link=(-no-pie)
+ if [[ -n $windows ]]; then
+@@ -132,10 +139,11 @@ else
+ "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" "${link[@]}" -o out/bb-probe
+ echo "Built $PWD/out/bb-probe"
+ # GPU and controller inventory; keep the Windows C dialect and include SDL headers.
+-"$CC" "${cstd[@]}" -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
++"$CC" "${cstd[@]}" -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" \
++    $([[ -n $windows ]] || printf '%s ' "${packaged[@]}") -o out/bb-gpu-capabilities
+ fi
+ if [[ ${1:-} == --test ]]; then
+-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
++    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c src/runtime_host.c "${libraries[@]}" -o out/pad-test
+     out/pad-test
+     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
+     out/runtime-test
+diff --git a/gpu/CMakeLists.txt b/gpu/CMakeLists.txt
+index 7fc48a7..4af4f8f 100644
+--- a/gpu/CMakeLists.txt
++++ b/gpu/CMakeLists.txt
+@@ -67,48 +67,50 @@ find_package(PkgConfig REQUIRED)
+ pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
+ pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
+ find_package(Zydis REQUIRED)
+-if (WIN32)
+-    # bbport: Windows (MSYS2 MINGW64). bbgpu is a static library linked into bb-probe.exe
+-    # (a DLL cannot leave the runtime_* symbols undefined). Packages MSYS2 does not ship
+-    # (magic_enum, miniz, xbyak) are fetched; VMA is header-only there.
+-    include(FetchContent)
+-    find_package(magic_enum QUIET)
+-    if (NOT TARGET magic_enum::magic_enum)
+-        FetchContent_Declare(magic_enum GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
+-            GIT_TAG v0.9.7 GIT_SHALLOW TRUE)
+-        FetchContent_MakeAvailable(magic_enum)
+-    endif()
+-    find_package(miniz QUIET)
++# Header and small libraries some distributions do not ship (MSYS2: magic_enum, miniz, xbyak;
++# Arch: magic_enum, xbyak, VMA) are fetched when no system package is found.
++include(FetchContent)
++find_package(magic_enum QUIET)
++if (NOT TARGET magic_enum::magic_enum)
++    FetchContent_Declare(magic_enum GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
++        GIT_TAG v0.9.7 GIT_SHALLOW TRUE)
++    FetchContent_MakeAvailable(magic_enum)
++endif()
++find_package(miniz QUIET)
++if (NOT TARGET miniz::miniz)
++    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
++    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
++    set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
++    set(BUILD_NO_STDIO OFF CACHE BOOL "" FORCE)
++    FetchContent_Declare(miniz GIT_REPOSITORY https://github.com/richgel999/miniz.git
++        GIT_TAG 3.1.0 GIT_SHALLOW TRUE)
++    FetchContent_MakeAvailable(miniz)
+     if (NOT TARGET miniz::miniz)
+-        set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+-        set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+-        set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+-        set(BUILD_NO_STDIO OFF CACHE BOOL "" FORCE)
+-        FetchContent_Declare(miniz GIT_REPOSITORY https://github.com/richgel999/miniz.git
+-            GIT_TAG 3.1.0 GIT_SHALLOW TRUE)
+-        FetchContent_MakeAvailable(miniz)
+-        if (NOT TARGET miniz::miniz)
+-            add_library(miniz::miniz ALIAS miniz)
+-        endif()
+-    endif()
+-    find_package(xbyak QUIET)
+-    if (NOT TARGET xbyak::xbyak)
+-        FetchContent_Declare(xbyak GIT_REPOSITORY https://github.com/herumi/xbyak.git
+-            GIT_TAG v7.24.2 GIT_SHALLOW TRUE)
+-        FetchContent_MakeAvailable(xbyak)
++        add_library(miniz::miniz ALIAS miniz)
+     endif()
+-    find_package(VulkanMemoryAllocator CONFIG QUIET)
+-    if (NOT TARGET GPUOpen::VulkanMemoryAllocator)
+-        find_path(VMA_INCLUDE_DIR vk_mem_alloc.h PATH_SUFFIXES vma REQUIRED)
+-        add_library(GPUOpen::VulkanMemoryAllocator INTERFACE IMPORTED)
+-        set_target_properties(GPUOpen::VulkanMemoryAllocator PROPERTIES
+-            INTERFACE_INCLUDE_DIRECTORIES ${VMA_INCLUDE_DIR})
++endif()
++find_package(xbyak QUIET)
++if (NOT TARGET xbyak::xbyak)
++    FetchContent_Declare(xbyak GIT_REPOSITORY https://github.com/herumi/xbyak.git
++        GIT_TAG v7.24.2 GIT_SHALLOW TRUE)
++    FetchContent_MakeAvailable(xbyak)
++endif()
++find_package(VulkanMemoryAllocator CONFIG QUIET)
++if (NOT TARGET GPUOpen::VulkanMemoryAllocator)
++    find_path(VMA_INCLUDE_DIR vk_mem_alloc.h PATH_SUFFIXES vma)
++    if (NOT VMA_INCLUDE_DIR)
++        FetchContent_Declare(vma GIT_REPOSITORY
++            https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
++            GIT_TAG v3.3.0 GIT_SHALLOW TRUE)
++        FetchContent_Populate(vma)
++        set(VMA_INCLUDE_DIR ${vma_SOURCE_DIR}/include)
+     endif()
+-else()
+-    find_package(magic_enum REQUIRED)
+-    find_package(VulkanMemoryAllocator CONFIG REQUIRED)
++    add_library(GPUOpen::VulkanMemoryAllocator INTERFACE IMPORTED)
++    set_target_properties(GPUOpen::VulkanMemoryAllocator PROPERTIES
++        INTERFACE_INCLUDE_DIRECTORIES ${VMA_INCLUDE_DIR})
++endif()
++if (NOT WIN32)
+     pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+-    find_package(miniz REQUIRED)
+ endif()
+ find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
+ 
+@@ -226,6 +228,9 @@ set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
+ # Keyboard prompts' keycaps (shim/engine/keycap_art.cpp): Roboto Medium (Apache License 2.0).
+ set_source_files_properties(shim/engine/keycap_art.cpp PROPERTIES
+     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui/misc/fonts/Roboto-Medium.ttf)
++# The mouse camera's asm stubs reference their globals from top-level asm, which GCC's LTO
++# does not see (it localizes and renames them): compiled without LTO.
++set_source_files_properties(shim/input/mouse_camera_stubs.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
+ target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
+ target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
+ target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
+@@ -236,11 +241,11 @@ if(NOT WIN32)
+ endif()
+ target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
+ target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
+-    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
++    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit
++    xbyak::xbyak)
+ if (WIN32)
+     # Windows headers: no min/max macros, no winsock 1 clash; Windows 10+ APIs (SetThreadDescription).
+     target_compile_definitions(bbgpu PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+-    target_link_libraries(bbgpu PUBLIC xbyak::xbyak)
+     if (BB_PGO STREQUAL "generate")
+         # bbport: the instrumented static library needs the profile runtime in bb-probe.exe's
+         # link (add_link_options does not reach it): written into bbgpu_link.txt below.
+diff --git a/gpu/bbnet/CMakeLists.txt b/gpu/bbnet/CMakeLists.txt
+index 56c05b7..71f6d16 100644
+--- a/gpu/bbnet/CMakeLists.txt
++++ b/gpu/bbnet/CMakeLists.txt
+@@ -26,12 +26,18 @@ target_compile_definitions(bbnet PRIVATE BOOST_ASIO_STANDALONE NDEBUG
+ target_compile_options(bbnet PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
+ target_link_libraries(bbnet PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
+     protobuf::libprotobuf nlohmann_json::nlohmann_json OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
++# UPnP port mapping (net_upnp.h) on every platform; static on Windows, the shared library elsewhere.
++find_path(BBNET_MINIUPNPC_INCLUDE miniupnpc.h PATH_SUFFIXES miniupnpc REQUIRED)
++target_include_directories(bbnet PRIVATE ${BBNET_MINIUPNPC_INCLUDE})
++if(WIN32)
++    find_library(BBNET_MINIUPNPC_LIBRARY NAMES libminiupnpc.a miniupnpc REQUIRED)
++else()
++    find_library(BBNET_MINIUPNPC_LIBRARY NAMES miniupnpc REQUIRED)
++    target_link_libraries(bbnet PUBLIC ${BBNET_MINIUPNPC_LIBRARY})
++endif()
+ if(WIN32)
+     target_sources(bbnet PRIVATE third_party/wepoll/wepoll.c)
+     target_include_directories(bbnet PRIVATE third_party/wepoll)
+-    find_path(BBNET_MINIUPNPC_INCLUDE miniupnpc.h PATH_SUFFIXES miniupnpc REQUIRED)
+-    find_library(BBNET_MINIUPNPC_LIBRARY NAMES libminiupnpc.a miniupnpc REQUIRED)
+-    target_include_directories(bbnet PRIVATE ${BBNET_MINIUPNPC_INCLUDE})
+     target_compile_definitions(bbnet PRIVATE MINIUPNP_STATICLIB NOMINMAX WIN32_LEAN_AND_MEAN)
+     target_compile_options(bbnet PRIVATE
+         $<$<COMPILE_LANGUAGE:CXX>:-include ${CMAKE_CURRENT_SOURCE_DIR}/include/bb_win_compat.h>)
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
+index 7f23aed..60e19b4 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
+@@ -832,7 +832,6 @@ void Instance::CreateAllocator() {
+     }();
+     const VmaAllocatorCreateInfo allocator_info = {
+         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
+-        .preferredLargeHeapBlockSize = block_size,
+         .physicalDevice = physical_device,
+         .device = *device,
+         .preferredLargeHeapBlockSize = block_size,
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
+index d83ff0d..18bbfba 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
+@@ -358,7 +358,7 @@ void Swapchain::FindPresentFormat() {
+     if ((features & composite_features) != composite_features) {
+         std::printf("HDR output: %s cannot hold the SDR picture for the encode; staying SDR\n",
+                     vk::to_string(surface_format.format).c_str());
+-        hdr_format = {};
++        hdr_format = vk::SurfaceFormatKHR{};
+         return;
+     }
+     std::printf("HDR output: %s, paper white %.0f nits, peak %.0f nits, highlight boost %.2f\n",
+diff --git a/gpu/shim/bbport_platform.cpp b/gpu/shim/bbport_platform.cpp
+index 52f794d..3ab0e14 100644
+--- a/gpu/shim/bbport_platform.cpp
++++ b/gpu/shim/bbport_platform.cpp
+@@ -145,3 +145,47 @@ unsigned CapSpinUs(unsigned wanted) {
+ 
+ } // namespace BbThreads
+ #endif
++
++#ifndef _WIN32
++#include "bbport_threads.h"
++
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++// src/runtime_host.c: the calling thread `levels` above the process's nice level.
++extern "C" int host_thread_raise(int levels);
++
++namespace BbThreads {
++
++namespace {
++bool Raising() {
++    static const bool enabled = [] {
++        const char* env = std::getenv("BB_GPU_THREAD_PRIORITY");
++        return !(env && env[0] == '0');
++    }();
++    return enabled;
++}
++// The system refused a nice level below 0 (no RLIMIT_NICE, no CAP_SYS_NICE): the chain stays
++// normal, and spins are not capped for it.
++std::atomic<bool> g_refused{false};
++} // namespace
++
++// As on Windows (above): the game runs dozens of threads at normal priority, and a render-chain
++// thread queued behind them delays the frame. Five nice levels above them gives it about three
++// times their share of a busy core; its idle spins stay bounded.
++void MakeCritical(bool bulk) {
++    if (!Raising() || (bulk && Available() < 16)) {
++        return;
++    }
++    if (host_thread_raise(5) != 0 && !g_refused.exchange(true)) {
++        std::printf("GPU: render threads stay at normal priority: this system allows no higher one "
++                    "(ulimit -e; BB_GPU_THREAD_PRIORITY=0 skips trying)\n");
++    }
++}
++
++unsigned CapSpinUs(unsigned wanted) {
++    return Raising() && !g_refused.load(std::memory_order_relaxed) && Available() < 16 ? std::min(wanted, 50u) : wanted;
++}
++
++} // namespace BbThreads
++#endif
+diff --git a/gpu/shim/bbport_threads.h b/gpu/shim/bbport_threads.h
+index 8336b8d..b2613d7 100644
+--- a/gpu/shim/bbport_threads.h
++++ b/gpu/shim/bbport_threads.h
+@@ -29,9 +29,11 @@ void MakeCritical(bool bulk = false);
+ /// with fewer than 16 hardware threads (a raised thread spinning keeps a game thread waiting).
+ unsigned CapSpinUs(unsigned wanted);
+ #else
+-/// Linux: unchanged (normal priority; raising it needs privileges).
+-inline void MakeCritical(bool = false) {}
+-inline unsigned CapSpinUs(unsigned wanted) { return wanted; }
++/// Linux (bbport_platform.cpp): the render chain five nice levels above the game's own threads, when
++/// the system allows it (RLIMIT_NICE or CAP_SYS_NICE); `bulk` as on Windows. BB_GPU_THREAD_PRIORITY=0: normal.
++void MakeCritical(bool bulk = false);
++/// As on Windows: at most 50 us with fewer than 16 hardware threads while the chain is raised.
++unsigned CapSpinUs(unsigned wanted);
+ /// Hardware threads available to the process.
+ inline unsigned Available() {
+     cpu_set_t set;
+diff --git a/gpu/shim/bbport_usage.cpp b/gpu/shim/bbport_usage.cpp
+index 1f2ea5f..680772d 100644
+--- a/gpu/shim/bbport_usage.cpp
++++ b/gpu/shim/bbport_usage.cpp
+@@ -9,6 +9,9 @@
+ #include <string>
+ #include <thread>
+ #include <vector>
++#ifndef _WIN32
++#include <dlfcn.h>
++#endif
+ 
+ #ifdef _WIN32
+ #ifndef NOMINMAX
+@@ -223,8 +226,113 @@ Sample Get(bool cpu, bool gpu) {
+     return last;
+ }
+ #else
+-Sample Get(bool, bool) {
+-    return {};
++namespace {
++
++/// The whole PC's CPU use since the last call, from /proc/stat's first line (idle and iowait
++/// count as idle).
++float CpuPercent() {
++    static std::uint64_t last_total = 0, last_idle = 0;
++    std::FILE* file = std::fopen("/proc/stat", "r");
++    if (!file) {
++        return -1.0f;
++    }
++    unsigned long long v[8] = {};
++    const int read = std::fscanf(file, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3],
++                                 &v[4], &v[5], &v[6], &v[7]);
++    std::fclose(file);
++    if (read < 4) {
++        return -1.0f;
++    }
++    std::uint64_t total = 0;
++    for (const auto value : v) {
++        total += value;
++    }
++    const std::uint64_t idle = v[3] + v[4];
++    const std::uint64_t dt = total - last_total, di = idle - last_idle;
++    const bool first = last_total == 0;
++    last_total = total;
++    last_idle = idle;
++    return first || dt == 0 ? -1.0f : 100.0f * static_cast<float>(dt - std::min(di, dt)) / static_cast<float>(dt);
++}
++
++/// The GPU's 3D use: amdgpu's gpu_busy_percent, or NVIDIA's NVML (the driver's
++/// libnvidia-ml.so.1, loaded when first asked); -1 for other GPUs (Intel has no such counter).
++class GpuCounter {
++public:
++    float Percent() {
++        if (!tried_) {
++            tried_ = true;
++            Open();
++        }
++        if (!amd_.empty()) {
++            std::FILE* file = std::fopen(amd_.c_str(), "r");
++            int busy = -1;
++            if (file) {
++                if (std::fscanf(file, "%d", &busy) != 1) busy = -1;
++                std::fclose(file);
++            }
++            return busy >= 0 ? static_cast<float>(busy) : -1.0f;
++        }
++        if (utilization_ && device_) {
++            Utilization use{};
++            return utilization_(device_, &use) == 0 ? static_cast<float>(use.gpu) : -1.0f;
++        }
++        return -1.0f;
++    }
++
++private:
++    struct Utilization {
++        unsigned gpu, memory;
++    };
++    using InitFn = int (*)();
++    using HandleFn = int (*)(unsigned, void**);
++    using UtilizationFn = int (*)(void*, Utilization*);
++
++    void Open() {
++        for (int card = 0; card < 8; ++card) {
++            const std::string path = "/sys/class/drm/card" + std::to_string(card) + "/device/gpu_busy_percent";
++            if (std::FILE* file = std::fopen(path.c_str(), "r")) {
++                std::fclose(file);
++                amd_ = path;
++                return;
++            }
++        }
++        void* nvml = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
++        if (!nvml) {
++            return;
++        }
++        const auto init = reinterpret_cast<InitFn>(dlsym(nvml, "nvmlInit_v2"));
++        const auto handle = reinterpret_cast<HandleFn>(dlsym(nvml, "nvmlDeviceGetHandleByIndex_v2"));
++        const auto utilization = reinterpret_cast<UtilizationFn>(dlsym(nvml, "nvmlDeviceGetUtilizationRates"));
++        if (init && handle && utilization && init() == 0 && handle(0, &device_) == 0) {
++            utilization_ = utilization;
++        }
++    }
++
++    bool tried_ = false;
++    std::string amd_;
++    void* device_ = nullptr;
++    UtilizationFn utilization_ = nullptr;
++};
++
++} // namespace
++
++Sample Get(bool cpu, bool gpu) {
++    static Sample last;
++    static auto next = std::chrono::steady_clock::time_point{};
++    static GpuCounter counter;
++    const auto now = std::chrono::steady_clock::now();
++    if (now < next) {
++        return last;
++    }
++    next = now + std::chrono::milliseconds(500);
++    if (cpu) {
++        last.cpu = CpuPercent();
++    }
++    if (gpu) {
++        last.gpu = counter.Percent();
++    }
++    return last;
+ }
+ #endif
+ 
+diff --git a/gpu/shim/engine/trophy_sync.cpp b/gpu/shim/engine/trophy_sync.cpp
+index e4d8d8f..1268620 100644
+--- a/gpu/shim/engine/trophy_sync.cpp
++++ b/gpu/shim/engine/trophy_sync.cpp
+@@ -16,6 +16,9 @@
+ #include <cstdint>
+ #include <cstdio>
+ 
++// src/runtime_trophies.c: recorded in trophies.log, without a notification.
++extern "C" void runtime_trophy_record(int id, int earned_in_save);
++
+ namespace BbEngine::TrophySync {
+ namespace {
+ struct Earned {
+@@ -84,6 +87,7 @@ void Tick() {
+         }
+         g_reported.set(i);
+         std::printf("Runtime: trophy %d earned in this save\n", kEarned[i].trophy);
++        runtime_trophy_record(kEarned[i].trophy, 1);
+     }
+ }
+ } // namespace BbEngine::TrophySync
+diff --git a/gpu/shim/input/mouse_camera_stubs.cpp b/gpu/shim/input/mouse_camera_stubs.cpp
+index 4770d07..f4faf06 100644
+--- a/gpu/shim/input/mouse_camera_stubs.cpp
++++ b/gpu/shim/input/mouse_camera_stubs.cpp
+@@ -7,10 +7,19 @@
+ // step (tests/decomp/follow_camera_test.cpp).
+ #include "mouse_camera_stubs.h"
+ 
++// The stubs below read these with plain rip-relative loads, which a shared library (Linux
++// libbbgpu.so) links only for symbols that cannot be preempted: hidden, as nothing outside
++// the library uses them.
++#ifdef _WIN32
++#define BB_STUB_DATA
++#else
++#define BB_STUB_DATA __attribute__((visibility("hidden")))
++#endif
++
+ extern "C" {
+-void* g_mouse_camera_host = nullptr;
+-std::uint64_t g_mouse_camera_resume = 0;
+-std::uint8_t bb_mouse_camera_free_now = 0;
++BB_STUB_DATA void* g_mouse_camera_host = nullptr;
++BB_STUB_DATA std::uint64_t g_mouse_camera_resume = 0;
++BB_STUB_DATA std::uint8_t bb_mouse_camera_free_now = 0;
+ }
+ 
+ // The two stores the hook displaced, then the host with every register the
+diff --git a/run.sh b/run.sh
+index 7c0ccfd..e3668aa 100644
+--- a/run.sh
++++ b/run.sh
+@@ -49,73 +49,6 @@ if [[ -z ${PYTHON:-} ]]; then
+     fi
+ fi
+ if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1; fi
+-# BB_GAME_DIR: the game's folder (eboot.bin, sce_module, ...); default next to this directory.
+-game=${BB_GAME_DIR:-../CUSA03173}
+-if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
+-original_game=$game
+-game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
+-    --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
+-    --enabled "${BB_MODS_ENABLED:-1}")
+-# A private merged view lasts for this launch, including restarts. Cleanup only our own view.
+-if [[ $game != "$(realpath "$original_game")" ]]; then
+-    mod_game=$game
+-    trap '"$PYTHON" -c '\''import shutil,sys; shutil.rmtree(sys.argv[1])'\'' "$mod_game"' EXIT
+-fi
+-"$PYTHON" scripts/prepare.py "$game" --out "$out"
+-"$PYTHON" scripts/link_libc.py "$game" --out "$out"
+-"$PYTHON" scripts/link_modules.py "$game" --out "$out"
+-"$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}"
+-# Sizes chosen below for the previous launch are recomputed after an in-game restart.
+-if [[ ${BB_AUTO_RENDER_RES:-} == 1 ]]; then
+-    unset BB_RENDER_RES BB_OUTPUT_RES BB_AUTO_RENDER_RES
+-fi
+-# BB_RENDER_RES=WxH explicitly sets the game's render resolution (a patch at start).
+-# Frame rate: BB_FPS=uncap (default; delta-time patch, vblank 480 Hz, frames shown at once),
+-# 60/90 (fixed-timestep patches) or 30 (unpatched). BB_PATCHES adds patch names ("a;b").
+-fps=${BB_FPS:-uncap}
+-# bbport.ini output_res other than 1080p (720p for the Steam Deck, 1440p, 2160p): the whole game
+-# renders at the preset's size of the output (a patch), the upscaler fills the output, the UI is
+-# drawn at the output size. Preset and output changes need a restart.
+-# Live resolution changes keep the guest at 1920x1080 and scale host targets at run time instead
+-# (output and presets change in the menu without a restart, but post-processing stays at 1080p
+-# and scene targets are copied back: much slower on the Steam Deck and older GPUs). Chosen by
+-# BB_LIVE_RES=0/1, else bbport.ini live_resolution=0/1/auto (auto: the GPU check, strong
+-# discrete GPUs get them); off when unset. 1080p output and TAA always use the live path.
+-if [[ -z ${BB_RENDER_RES:-} ]]; then
+-    read -r scaled_render scaled_output < <("$PYTHON" scripts/patches.py --print-scaled --settings "$BB_CONFIG") || true
+-fi
+-live=0
+-if [[ -n ${scaled_output:-} ]]; then
+-    live=${BB_LIVE_RES:-}
+-    # Bash builtins only: the AppImage's PATH has no sed/grep (a missing one ended run.sh silently).
+-    if [[ -z $live && -f $BB_CONFIG ]]; then
+-        while IFS= read -r line || [[ -n $line ]]; do
+-            [[ $line =~ ^live_resolution=([01]|auto)$ ]] && live=${BASH_REMATCH[1]}
+-        done < "$BB_CONFIG"
+-    fi
+-    if [[ $live == auto ]]; then
+-        if [[ -n ${BB_PROBE:-} ]]; then caps=$(dirname -- "$BB_PROBE")/bb-gpu-capabilities
+-        elif [[ -n ${BB_PREBUILT:-} ]]; then caps=bin/bb-gpu-capabilities
+-        else caps=out/bb-gpu-capabilities; fi
+-        live=$("$caps" --live-resolution 2> >(while IFS= read -r line; do
+-            [[ $line == *MANGOHUD* ]] || printf '%s\n' "$line"; done >&2)) || live=0
+-    fi
+-    [[ $live == 1 ]] || live=0
+-fi
+-if [[ $live == 1 ]]; then
+-    echo "Output ${scaled_output}: live resolution changes (live_resolution=0: startup patch)"
+-elif [[ -n ${scaled_output:-} ]]; then
+-    export BB_RENDER_RES=$scaled_render BB_OUTPUT_RES=$scaled_output BB_AUTO_RENDER_RES=1
+-    export BB_DMEM_MB=${BB_DMEM_MB:-9152}
+-    echo "Output ${scaled_output}: scene ${scaled_render}, direct memory ${BB_DMEM_MB} MiB (live_resolution=1: live changes)"
+-fi
+-"$PYTHON" scripts/patches.py --out "$out" --fps "$fps" --extra "${BB_PATCHES:-}" --settings "$BB_CONFIG" --game-dir "$game" --render-res "${BB_RENDER_RES:-}" --output-res "${BB_OUTPUT_RES:-}" \
+-    --patches-dir "${BB_PATCHES_DIR:-$data/patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}"
+-# Background upload of the game's GPU memory into VRAM ahead of use (BufferCache::Preupload):
+-# 1 = only memory already in VRAM that the game rewrote (no new VRAM), 2 = all of it (~3 GB more
+-# VRAM), 0 = off. BB_GUEST_GPU_MEMORY=1 puts guest direct memory in GPU-visible dma-buf chunks
+-# (BB_GUEST_IN_PLACE below implies it: it commits all allocated memory up front and rules out BB_UFFD).
+-export BB_PREUPLOAD=${BB_PREUPLOAD:-1}
+ # Memory model and translation. BB_PC_MODEL=1 (the launcher's "New memory and translation model",
+ # experimental, off by default) selects how a PC release would work: the GPU uses the game's
+ # memory where it is (GPU-visible system memory) and keeps the data it reads often in VRAM, the
+@@ -131,6 +64,11 @@ if [[ ${BB_AS_0_3:-0} == 1 ]]; then
+     export BB_GUEST_IN_PLACE=0 BB_HOST_COPY_WAITS=all BB_PRODUCER_CHECK=1
+ fi
+ export BB_GUEST_IN_PLACE=${BB_GUEST_IN_PLACE:-${BB_PC_MODEL:-0}}
++# Background upload of the game's GPU memory into VRAM ahead of use (BufferCache::Preupload):
++# 1 = only memory already in VRAM that the game rewrote (no new VRAM), 2 = all of it (~3 GB more
++# VRAM), 0 = off. BB_GUEST_GPU_MEMORY=1 puts guest direct memory in GPU-visible dma-buf chunks
++# (BB_GUEST_IN_PLACE above implies it: it commits all allocated memory up front and rules out BB_UFFD).
++export BB_PREUPLOAD=${BB_PREUPLOAD:-1}
+ # MangoHud (launcher switch: MANGOHUD=1) must be drawn once. Two overlays on top of each other
+ # showed doubled, offset text: the Steam Deck's performance overlay (mangoapp, game mode) plus the
+ # in-game layer, or the AppImage's bundled layer plus a system MangoHud (the layer names differ,
+@@ -159,28 +97,12 @@ export BB_COPY_GPU_BUFFERS=${BB_COPY_GPU_BUFFERS:-1}
+ # A guest write next to small GPU outputs the GPU is still writing (counters, compute results,
+ # up to BB_GPU_WRITE_TWINS_MAX bytes per page) does not wait for the GPU (BufferCache twins).
+ export BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-1} BB_GPU_WRITE_TWINS_MAX=${BB_GPU_WRITE_TWINS_MAX:-65536}
+-if [[ -z ${BB_VBLANK_HZ:-} ]]; then
+-    case $fps in uncap) export BB_VBLANK_HZ=480 ;; 90) export BB_VBLANK_HZ=90 ;; *) export BB_VBLANK_HZ=60 ;; esac
+-fi
+ # FSR 4: faster post passes next to the downloaded ones (incremental; tools/fsr4_optimize.sh).
+ if [[ -z ${BB_PREBUILT:-} && -d fsr4_shaders ]] && command -v spirv-cross >/dev/null; then
+     bash tools/fsr4_optimize.sh || echo 'FSR 4: optimized post passes not built' >&2
+ fi
+-if [[ -n ${BB_PREBUILT:-} ]]; then
+-    probe=${BB_PROBE:-bin/bb-probe}
+-else
+-    bash build.sh
+-    probe=${BB_PROBE:-out/bb-probe}  # BB_PROBE: a wrapper (gdb) around it
+-fi
+-probe_args=("$out/boot-linked.bin" --content-profile "$out/content.bin" --patches "$out/patches.bin" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
+-if [[ -n ${mod_game:-} ]]; then
+-    "$probe" "${probe_args[@]}" &
+-    mod_pid=$!
+-    trap 'kill -TERM "$mod_pid" 2>/dev/null || true' TERM INT
+-    mod_status=0
+-    wait "$mod_pid" || mod_status=$?
+-    # An interrupted wait must finish the child before removing its mounted view.
+-    if kill -0 "$mod_pid" 2>/dev/null; then wait "$mod_pid" || mod_status=$?; fi
+-    exit "$mod_status"
+-fi
+-exec "$probe" "${probe_args[@]}"
++# The rest is shared with Windows (scripts/run_game.py): the game folder (BB_GAME_DIR, else the
++# last one used, else ../CUSA03173), mods, the boot image (reused while unchanged), the build
++# (unless BB_PREBUILT=1), online, the engine's own assets, frame rate, resolution and patches,
++# then bb-probe (BB_PROBE: a wrapper such as gdb around it).
++exec "$PYTHON" scripts/run_game.py "$@"
+diff --git a/scripts/run_game.py b/scripts/run_game.py
+new file mode 100644
+index 0000000..0af353c
+--- /dev/null
++++ b/scripts/run_game.py
+@@ -0,0 +1,448 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-or-later
++"""Prepare the game image, compile the patches and start bb-probe, on Windows and Linux:
++run.bat and the Windows launcher run it through run_windows.py, run.sh and the Linux launcher
++directly. The same environment variables and bbport.ini settings on both.
++
++    run.bat [--game-dir DIR] [bb-probe options...]
++    run.sh  (BB_GAME_DIR=DIR)
++
++The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_dir.txt), else
++../CUSA03173. Unless BB_PREBUILT=1 the port is (re)built first: through MSYS2 on Windows
++(build.sh in the CLANG64 environment), by run.sh itself on Linux."""
++import atexit
++from datetime import datetime
++import hashlib
++import json
++import os
++from pathlib import Path
++import shlex
++import shutil
++import signal
++import subprocess
++import sys
++import struct
++import time
++import zlib
++from mods import remove_overlay
++
++ROOT = Path(__file__).resolve().parent.parent
++SCRIPTS = ROOT / 'scripts'
++# The helper scripts' interpreter: $PYTHON when run.sh found or was given one, else this one.
++PYTHON = os.environ.get('PYTHON') or sys.executable
++LOG_STREAM = None
++WINDOWS = os.name == 'nt'
++EXE = '.exe' if WINDOWS else ''  # the engine's programs in out/
++
++
++def init_session_log():
++    """Route launcher/runtime diagnostics to BB_LOG_FILE when the GUI launcher supplies one."""
++    global LOG_STREAM
++    path = os.environ.get('BB_LOG_FILE')
++    if not path:
++        return
++    log_path = Path(path)
++    log_path.parent.mkdir(parents=True, exist_ok=True)
++    LOG_STREAM = log_path.open('a', encoding='utf-8', errors='backslashreplace', buffering=1)
++    atexit.register(LOG_STREAM.close)
++    sys.stdout = LOG_STREAM
++    sys.stderr = LOG_STREAM
++    print('=' * 80)
++    print(f'Bloodborne PC session log started: {datetime.now().isoformat(timespec="seconds")}')
++    print(f'Launcher root: {ROOT}')
++    print(f'Log file: {log_path.resolve()}')
++    print('=' * 80, flush=True)
++
++
++def msys_root():
++    return Path(os.environ.get('BB_MSYS2', r'C:\msys64'))
++
++
++def display_size(out=None):
++    """The primary display's resolution in pixels (output_res = auto), or None: from Windows,
++    or on Linux from SDL through bb-gpu-capabilities --display-size (X11 and Wayland alike)."""
++    if not WINDOWS:
++        if out is None:
++            return None
++        caps = engine_program(out, 'bb-gpu-capabilities')
++        size = run([caps, '--display-size'], capture=True, check=False) if caps.is_file() else ''
++        try:
++            w, h = (int(v) for v in (size or '').split('x'))
++        except ValueError:
++            return None
++        return (w - w % 2, h - h % 2) if w >= 640 and h >= 360 else None
++    try:
++        import ctypes
++        user32 = ctypes.windll.user32
++        user32.SetProcessDPIAware()  # physical pixels, not the scaled ones
++        w, h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
++        return (w - w % 2, h - h % 2) if w >= 640 and h >= 360 else None
++    except (AttributeError, OSError):
++        return None
++
++
++def large_scene(render):
++    """Whether a scene of `render` ('WxH') needs the 9152 MiB pool: above 1920x1080."""
++    w, h = (int(v) for v in render.split('x'))
++    return w * h > 1920 * 1080
++
++
++def run(arguments, capture=False, check=True, env=None):
++    result = subprocess.run(
++        [str(a) for a in arguments],
++        cwd=ROOT,
++        env=env,
++        stdout=subprocess.PIPE if capture else LOG_STREAM,
++        stderr=LOG_STREAM,
++        text=True,
++    )
++    if capture and LOG_STREAM is not None and result.stdout:
++        LOG_STREAM.write(result.stdout)
++        if not result.stdout.endswith('\n'):
++            LOG_STREAM.write('\n')
++        LOG_STREAM.flush()
++    if check and result.returncode:
++        print(f'Command failed with exit code {result.returncode}: '
++              f'{" ".join(shlex.quote(str(a)) for a in arguments)}', flush=True)
++        sys.exit(result.returncode)
++    return result.stdout.strip() if capture else result.returncode
++
++
++def build():
++    """build.sh: in a CLANG64 login shell on Windows (its clang, cmake, ninja and pkg-config),
++    directly elsewhere."""
++    if not WINDOWS:
++        run(['bash', 'build.sh'])
++        return
++    bash = msys_root() / 'usr/bin/bash.exe'
++    if not bash.is_file():
++        sys.exit(f'MSYS2 not found at {msys_root()} (set BB_MSYS2, or BB_PREBUILT=1 with a built out/)')
++    env = dict(os.environ, MSYSTEM='CLANG64', CHERE_INVOKING='1')
++    run([bash, '-lc', 'bash build.sh'], env=env)
++
++
++# The image the engine boots (prepare.py, link_libc.py, link_modules.py, content_profile.py):
++# about 300 MB written and 235,000 relocations applied, the same every launch for the same game.
++# It is made again only when what it is made from changes - the game's executable, modules and
++# parameters, the content SKU, these scripts - and reused otherwise (out/prepared.json).
++PREPARE_SCRIPTS = ('prepare.py', 'link_libc.py', 'link_modules.py', 'content_profile.py', 'game_check.py')
++PREPARED = ('boot.bin', 'eboot.elf', 'entry.bin', 'analysis.json', 'boot-libc.bin', 'libc-link.json',
++            'boot-linked.bin', 'link.json', 'content.bin', 'content-profile.json')
++
++
++def prepare_key(game, sku):
++    digest = hashlib.sha256()
++    modules = sorted((game / 'sce_module').iterdir()) if (game / 'sce_module').is_dir() else []
++    # patches/redzone.json: the stores link_modules.py moves below the red zone (Intel 12th gen+).
++    for path in [game / 'eboot.bin', game / 'sce_sys/param.sfo', *modules, *(SCRIPTS / s for s in PREPARE_SCRIPTS),
++                 ROOT / 'patches' / 'redzone.json']:
++        digest.update(path.name.encode('utf-8') + b'\0')
++        if path.is_file():
++            with path.open('rb') as f:
++                while chunk := f.read(1 << 20):
++                    digest.update(chunk)
++        digest.update(b'\0')
++    digest.update(f'sku={sku};check={os.environ.get("BB_SKIP_GAME_CHECK", "")}'.encode('utf-8'))
++    return digest.hexdigest()
++
++
++def prepare_image(game, out):
++    """The boot image for `game` in `out`: reused when unchanged, else made by the scripts."""
++    started = time.monotonic()
++    sku = os.environ.get('BB_CONTENT_SKU', 'full')
++    stamp = out / 'prepared.json'
++    key = prepare_key(game, sku)
++    try:
++        reusable = json.loads(stamp.read_text(encoding='utf-8')).get('key') == key
++    except (OSError, ValueError, AttributeError):
++        reusable = False
++    if reusable and all((out / name).is_file() for name in PREPARED):
++        print(f'Boot image unchanged: reused ({time.monotonic() - started:.1f} s)', flush=True)
++        return
++    stamp.unlink(missing_ok=True)  # a run stopped half way leaves no stamp behind
++    for script, extra in (('prepare.py', []), ('link_libc.py', []), ('link_modules.py', []),
++                          ('content_profile.py', ['--sku', sku])):
++        run([PYTHON, SCRIPTS / script, game, '--out', out, *extra])
++    stamp.write_text(json.dumps({'key': key}) + '\n', encoding='utf-8')
++    print(f'Boot image prepared in {time.monotonic() - started:.1f} s (reused on later launches)', flush=True)
++
++
++def settings_value(config, key):
++    if not config.is_file():
++        return None
++    for line in config.read_text(errors='replace').splitlines():
++        name, _, value = line.partition('=')
++        if name.strip() == key:
++            return value.strip()
++    return None
++
++
++def gpu_cache_dir(env=os.environ):
++    """Where the engine keeps its shader and pipeline caches (bb-probe runs in ROOT)."""
++    return Path(env.get('BB_GPU_USER_DIR', ROOT / 'user')) / 'cache'
++
++
++def reset_stale_gpu_cache(cache, engine):
++    """Deletes the shader and pipeline caches another engine build wrote. The engine checks them
++    against the GPU only, so a damaged record or one from an older build was preloaded every
++    session, through updates (characters' skin and hair missing in every save: GitHub issue 30).
++    The first start of each engine rebuilds them, as after a driver update. The GPU driver's own
++    cache (*.vkcache) stays: the engine checks it against the GPU and driver, and it holds only
++    what the driver compiled, so the next start compiles less."""
++    stamp = cache / 'engine.txt'
++    try:
++        if not engine or stamp.read_text(encoding='utf-8').strip() == engine:
++            return False
++    except OSError:
++        pass
++    removed = False
++    if cache.is_dir():
++        for entry in cache.iterdir():
++            if entry == stamp or entry.suffix == '.vkcache':
++                continue
++            try:
++                if entry.is_dir() and not entry.is_symlink():
++                    shutil.rmtree(entry)
++                else:
++                    entry.unlink()
++                removed = True
++            except OSError as error:
++                print(f'GPU cache: cannot remove {entry.name}: {error}', flush=True)
++                return False
++    cache.mkdir(parents=True, exist_ok=True)
++    stamp.write_text(engine + '\n', encoding='utf-8')
++    if removed:
++        print(f'GPU cache: cleared for engine {engine}; shaders compile again on this start', flush=True)
++    return removed
++
++
++def configure_frame_rate(env):
++    """Windows supports the tested fixed-timestep presets, including old config migration.
++
++    Explicit limits also override inherited BB_VBLANK_HZ=0 / BB_FPS_LIMIT=0 so a
++    legacy uncapped launch cannot saturate the desktop during menus or loading.
++    """
++    fps = env.get('BB_FPS', '60')
++    # Bloodborne PC: 120 and 144 are the 90 FPS++ patch with its frame-rate values for that rate
++    # (patches.py SCALED_FPS; the uncapped patch froze Vicar Amelia's intro at any rate). 144 Hz
++    # is above the vblank rates the engine paces on (it runs 480 Hz then); the limit holds 144.
++    if fps in ('120', '144'):
++        env.update(BB_FPS=fps, BB_FPS_LIMIT=fps, BB_VBLANK_HZ=fps)
++        return fps
++    # Other rates above 90 use the uncapped patch (with the sprint fix) and the frame limiter;
++    # "uncap" runs unlimited unless BB_FPS_LIMIT asks for a cap.
++    if fps == 'uncap' or (fps.isdigit() and int(fps) > 90):
++        limit = fps if fps.isdigit() else env.get('BB_FPS_LIMIT', '0')
++        env.update(BB_FPS='uncap', BB_FPS_LIMIT=limit if limit.isdigit() else '0', BB_VBLANK_HZ='0')
++        return 'uncap'
++    if fps not in ('30', '60', '90'):
++        print(f'Unsupported FPS preset {fps!r}; using 60 FPS.', flush=True)
++        fps = '60'
++    env.update(BB_FPS=fps, BB_FPS_LIMIT=fps, BB_VBLANK_HZ='90' if fps == '90' else '60')
++    return fps
++
++
++def engine_program(out, name):
++    """One of the engine's programs: out/<name>(.exe), or bin/<name> in a packaged Linux build
++    (the AppImage's layout, BB_PREBUILT=1) when out/ has none."""
++    built = out / f'{name}{EXE}'
++    packaged = ROOT / 'bin' / name
++    if not WINDOWS and os.environ.get('BB_PREBUILT') == '1' and not built.is_file() and packaged.is_file():
++        return packaged
++    return built
++
++
++def run_probe(command):
++    """Runs bb-probe and returns its exit status. A stop (Ctrl+C, or the launcher's SIGTERM)
++    ends bb-probe first, so the mods overlay is removed only after nothing reads it."""
++    process = subprocess.Popen([str(c) for c in command], cwd=ROOT, stdout=LOG_STREAM, stderr=LOG_STREAM)
++    def stop(signum, _frame):
++        process.send_signal(signum)
++    if not WINDOWS:
++        signal.signal(signal.SIGTERM, stop)
++    try:
++        while True:
++            try:
++                return process.wait()
++            except KeyboardInterrupt:
++                # The terminal sent SIGINT to bb-probe too; wait for it to finish.
++                continue
++    finally:
++        if not WINDOWS:
++            signal.signal(signal.SIGTERM, signal.SIG_DFL)
++
++
++def main():
++    arguments = sys.argv[1:]
++    game = os.environ.get('BB_GAME_DIR')
++    if arguments[:1] == ['--game-dir'] and len(arguments) > 1:
++        game, arguments = arguments[1], arguments[2:]
++    data = Path(os.environ.get('BB_DATA_DIR', ROOT))
++    out = data / 'out'
++    try:
++        engine = json.loads((ROOT / 'package.json').read_text(encoding='utf-8-sig')).get('engine', '')
++        reset_stale_gpu_cache(gpu_cache_dir(), engine)
++    except (OSError, ValueError):
++        pass
++    out.mkdir(parents=True, exist_ok=True)
++    os.environ.setdefault('BB_CONFIG', str(data / 'bbport.ini'))
++    config = Path(os.environ['BB_CONFIG'])
++    from online import configure_online, read_settings
++    try:
++        override = configure_online(read_settings(config) if config.exists() else {}, data, os.environ)
++        print('Online: configured server profile and automatic game redirect' if override else 'Online: offline mode')
++    except (OSError, ValueError) as error:
++        sys.exit(f'Online configuration: {error}')
++    if 'BB_FSR411_DIR' not in os.environ and not (ROOT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
++        os.environ['BB_FSR411_DIR'] = str(data / 'fsr4_411')
++    # FSR 4.1.1 on any GPU: the fsr4vk provider DLL the package ships (vk_fsr4vk.cpp). The engine
++    # looks beside bb-probe.exe without this; the package keeps it at its top.
++    if 'BB_FSR4VK_DIR' not in os.environ and (ROOT / 'fsr4vk' / 'amd_fidelityfx_upscaler_vk.dll').is_file():
++        os.environ['BB_FSR4VK_DIR'] = str(ROOT / 'fsr4vk')
++    # The last folder that worked is remembered, so run.bat alone starts the game afterwards.
++    remembered = out / 'game_dir.txt'
++    if not game and remembered.is_file():
++        game = remembered.read_text(encoding='utf-8').strip()
++    game = Path(game) if game else ROOT.parent / 'CUSA03173'
++    if not (game / 'eboot.bin').is_file():
++        sys.exit(f'No eboot.bin in {game} (pass --game-dir or set BB_GAME_DIR).')
++    original = game.resolve()
++    remembered.write_text(str(original), encoding='utf-8')
++    os.environ['BB_GAME_DIR'] = str(original)
++    # The in-game menu's "Apply and restart" runs this launcher again (probe.c runtime_restart;
++    # on Linux it runs run.sh, which comes back here with the same environment).
++    os.environ['BB_RESTART_COMMAND'] = subprocess.list2cmdline([PYTHON, str(Path(__file__).resolve()), *sys.argv[1:]])
++
++    merged = Path(run([PYTHON, SCRIPTS / 'mods.py', original, '--out', out,
++                       '--mods-dir', os.environ.get('BB_MODS_DIR', data / 'mods'),
++                       '--config', os.environ.get('BB_MODS_CONFIG', data / 'mods.json'),
++                       '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
++    overlay = merged if merged.resolve() != original else None
++    # The first files the game reads: without them it crashes a second after opening.
++    core = ('dvdroot_ps4/shader/gxshader.shaderbnd.dcx', 'dvdroot_ps4/other/systex.tpf.dcx')
++    missing = [name for name in core if not (merged / name).is_file()]
++    if missing and overlay and all((original / name).is_file() for name in core):
++        print('Mods: the merged game lost its own files; starting without mods', flush=True)
++        remove_overlay(overlay)
++        merged, overlay, missing = original, None, []
++    if missing:
++        if overlay:
++            remove_overlay(overlay)
++        sys.exit(f'The game folder {original} is incomplete: {", ".join(missing)} missing. '
++                 'Dump or extract the game again (base game plus the 1.09 update).')
++    try:
++        prepare_image(merged, out)
++        prebuilt = os.environ.get('BB_PREBUILT') == '1'
++        if not prebuilt:
++            build()
++        # Engine features are prepared locally and only mounted after runtime byte checks.
++        for key in ('BB_DREAM_MIRROR_ASSET', 'BB_ENGINE_IMAGE_SHA256', 'BB_PC_MENU_ASSETS', 'BB_REBIRTH_ASSET'):
++            os.environ.pop(key, None)
++        # bbport: the engine's own features - picture tuning, cheats, trophies from a save, the
++        # online fixes - all check the executable first, so it is always verified (~0.1 s).
++        try:
++            from engine_assets import prepare_mirror, verify_executable
++            os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
++            if settings_value(config, 'change_appearance') == '1':
++                asset = prepare_mirror(merged, out / 'eboot.elf', data / 'engine-assets')
++                os.environ['BB_DREAM_MIRROR_ASSET'] = str(asset)
++                print(f'Engine: Dream mirror prepared locally: {asset}', flush=True)
++            if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
++                or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
++                from engine_assets import prepare_menu_assets
++                try:
++                    menus = prepare_menu_assets(merged, out / 'eboot.elf', data / 'engine-assets',
++                                                engine_program(out, 'bb-engine-assets'), rebirth=settings_value(config, 'rebirth') == '1')
++                    os.environ['BB_PC_MENU_ASSETS'] = str(menus)
++                    print(f'Engine: native PC menus prepared locally: {menus}', flush=True)
++                    if settings_value(config, 'rebirth') == '1':
++                        os.environ['BB_REBIRTH_ASSET'] = str(menus / 'dvdroot_ps4/script/talk/m24_02_00_00.talkesdbnd.dcx')
++                except (OSError, ValueError) as error:
++                    print(f'Engine: native PC menus disabled: {error}', flush=True)
++        except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
++            print(f'Engine: enhancement preparation skipped: {error}', flush=True)
++        # output_res = auto: the display's own size, for the scene size below and the engine.
++        if not os.environ.get('BB_DISPLAY_SIZE'):
++            size = display_size(out)
++            if size:
++                os.environ['BB_DISPLAY_SIZE'] = f'{size[0]}x{size[1]}'
++                if (settings_value(config, 'output_res') or '').lower() == 'auto':
++                    print(f'Output resolution: the display\'s own, {size[0]}x{size[1]}', flush=True)
++        # Sizes chosen below for the previous launch are recomputed after an in-game restart.
++        if os.environ.get('BB_AUTO_RENDER_RES') == '1':
++            for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
++                os.environ.pop(key, None)
++        fps = configure_frame_rate(os.environ)
++        scaled_render = scaled_output = None
++        if not os.environ.get('BB_RENDER_RES'):
++            sizes = run([PYTHON, SCRIPTS / 'patches.py', '--print-scaled', '--settings', config], capture=True, check=False)
++            if sizes and len(sizes.split()) == 2:
++                scaled_render, scaled_output = sizes.split()
++        live = '0'
++        if scaled_output:
++            live = os.environ.get('BB_LIVE_RES') or settings_value(config, 'live_resolution') or '0'
++            if live == 'auto':
++                # Next to BB_PROBE when that names another build (or a wrapper beside one).
++                caps = (Path(os.environ['BB_PROBE']).parent / f'bb-gpu-capabilities{EXE}' if os.environ.get('BB_PROBE')
++                        else engine_program(out, 'bb-gpu-capabilities'))
++                live = run([caps, '--live-resolution'], capture=True, check=False) or '0'
++            live = '1' if live == '1' else '0'
++        if live == '1':
++            print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
++        elif scaled_output:
++            os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
++            # The extra 4 GiB is for scenes above 1080p only: Windows counts the whole pool
++            # against RAM plus page file from the start, used or not. The scene, not the output:
++            # the output exists only on the host side (the upscaler fills it), and the game's UI
++            # stays 1920x1080. A 1440p output with a Quality upscaler (a 1706x960 scene) asked for
++            # 10 GB at start and failed on PCs with 16 GB (Windows error 1450).
++            if large_scene(scaled_render):
++                os.environ.setdefault('BB_DMEM_MB', '9152')
++            dmem = os.environ.get('BB_DMEM_MB', '5056')
++            print(f'Output {scaled_output}: scene {scaled_render}, direct memory {dmem} MiB '
++                  '(live_resolution=1: live changes)')
++        run([PYTHON, SCRIPTS / 'patches.py', '--out', out, '--fps', fps, '--extra', os.environ.get('BB_PATCHES', ''),
++             '--settings', config, '--game-dir', merged, '--render-res', os.environ.get('BB_RENDER_RES', ''),
++             '--output-res', os.environ.get('BB_OUTPUT_RES', ''),
++             '--patches-dir', os.environ.get('BB_PATCHES_DIR', data / 'patches'),
++             '--patches-config', os.environ.get('BB_PATCHES_CONFIG', data / 'patches.json')])
++        # bbport: a patch that enlarges the game's heaps (a resolution patch above 1080p chosen in
++        # the patches list, with a 1080p output here) overflows the 5056 MiB pool at start.
++        try:
++            info = json.loads((out / 'patches-info.json').read_text(encoding='utf-8'))
++        except (OSError, ValueError):
++            info = {}
++        heaps = info.get('heap_patch')
++        # The UI movie viewport the patches gave the game (patches.py ui_size): the renderer
++        # recognizes the UI pass by it and fits it to the output (ui_composition.h).
++        if info.get('ui_size', '1920x1080') != '1920x1080':
++            os.environ['BB_UI_SIZE'] = info['ui_size']
++            print(f"Widescreen: UI viewport {info['ui_size']} (the 16:9 stage centred in it)", flush=True)
++        else:
++            os.environ.pop('BB_UI_SIZE', None)
++        if heaps and 'BB_DMEM_MB' not in os.environ:
++            os.environ['BB_DMEM_MB'] = '9152'
++            print("Patches: the game's heaps are enlarged; direct memory 9152 MiB", flush=True)
++        probe = ROOT / os.environ.get('BB_PROBE', engine_program(out, 'bb-probe'))
++        command = [probe, out / 'boot-linked.bin', '--content-profile', out / 'content.bin',
++                   '--patches', out / 'patches.bin', '--app0', merged,
++                   '--user', os.environ.get('BB_USER_DIR', data / 'user'),
++                   '--timeout', os.environ.get('BB_TIMEOUT', '0'), *arguments]
++        if WINDOWS:
++            # MSYS2's DLLs (libc++, SDL3, FFmpeg, ...). System32 is searched before PATH, so the
++            # Vulkan loader stays the one installed with the GPU driver.
++            os.environ['PATH'] = os.pathsep.join([str(msys_root() / 'clang64/bin'), os.environ.get('PATH', '')])
++        print('Starting:', ' '.join(shlex.quote(str(c)) for c in command), flush=True)
++        status = run_probe(command)
++        print(f'bb-probe exited with code {status}', flush=True)
++        # Windows crash codes (0xC0000005) do not fit sys.exit: pass them on as the signed
++        # 32-bit value the launcher reads, not -1.
++        return status - (1 << 32) if status >= (1 << 31) else status
++    finally:
++        if overlay:
++            remove_overlay(overlay)
++
++
++if __name__ == '__main__':
++    init_session_log()
++    sys.exit(main())
+diff --git a/scripts/run_windows.py b/scripts/run_windows.py
+index 7091ebf..6fc44c2 100644
+--- a/scripts/run_windows.py
++++ b/scripts/run_windows.py
+@@ -1,400 +1,11 @@
+ #!/usr/bin/env python3
+ # SPDX-License-Identifier: GPL-2.0-or-later
+-"""Windows counterpart of run.sh: prepare the game image, compile the patches and start
+-out/bb-probe.exe. Same environment variables and bbport.ini settings as run.sh.
+-
+-    run.bat [--game-dir DIR] [bb-probe options...]
+-
+-The game folder: --game-dir, else BB_GAME_DIR, else the last one used (out/game_dir.txt), else
+-../CUSA03173 (as run.sh). Unless BB_PREBUILT=1
+-the port is (re)built first through MSYS2 (build.sh in the CLANG64 environment)."""
+-import atexit
+-from datetime import datetime
+-import hashlib
+-import json
+-import os
+-from pathlib import Path
+-import shlex
+-import shutil
+-import subprocess
++"""run.bat and the Windows launcher start the game here: scripts/run_game.py, the start script
++shared with Linux (its functions are imported from here by tests as well)."""
+ import sys
+-import struct
+-import time
+-import zlib
+-from mods import remove_overlay
+-
+-ROOT = Path(__file__).resolve().parent.parent
+-SCRIPTS = ROOT / 'scripts'
+-PYTHON = sys.executable
+-LOG_STREAM = None
+-
+-
+-def init_session_log():
+-    """Route launcher/runtime diagnostics to BB_LOG_FILE when the GUI launcher supplies one."""
+-    global LOG_STREAM
+-    path = os.environ.get('BB_LOG_FILE')
+-    if not path:
+-        return
+-    log_path = Path(path)
+-    log_path.parent.mkdir(parents=True, exist_ok=True)
+-    LOG_STREAM = log_path.open('a', encoding='utf-8', errors='backslashreplace', buffering=1)
+-    atexit.register(LOG_STREAM.close)
+-    sys.stdout = LOG_STREAM
+-    sys.stderr = LOG_STREAM
+-    print('=' * 80)
+-    print(f'Bloodborne PC session log started: {datetime.now().isoformat(timespec="seconds")}')
+-    print(f'Launcher root: {ROOT}')
+-    print(f'Log file: {log_path.resolve()}')
+-    print('=' * 80, flush=True)
+-
+-
+-def msys_root():
+-    return Path(os.environ.get('BB_MSYS2', r'C:\msys64'))
+-
+-
+-def display_size():
+-    """The primary display's resolution in pixels (output_res = auto), or None."""
+-    try:
+-        import ctypes
+-        user32 = ctypes.windll.user32
+-        user32.SetProcessDPIAware()  # physical pixels, not the scaled ones
+-        w, h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+-        return (w - w % 2, h - h % 2) if w >= 640 and h >= 360 else None
+-    except (AttributeError, OSError):
+-        return None
+-
+-
+-def large_scene(render):
+-    """Whether a scene of `render` ('WxH') needs the 9152 MiB pool: above 1920x1080."""
+-    w, h = (int(v) for v in render.split('x'))
+-    return w * h > 1920 * 1080
+-
+-
+-def run(arguments, capture=False, check=True, env=None):
+-    result = subprocess.run(
+-        [str(a) for a in arguments],
+-        cwd=ROOT,
+-        env=env,
+-        stdout=subprocess.PIPE if capture else LOG_STREAM,
+-        stderr=LOG_STREAM,
+-        text=True,
+-    )
+-    if capture and LOG_STREAM is not None and result.stdout:
+-        LOG_STREAM.write(result.stdout)
+-        if not result.stdout.endswith('\n'):
+-            LOG_STREAM.write('\n')
+-        LOG_STREAM.flush()
+-    if check and result.returncode:
+-        print(f'Command failed with exit code {result.returncode}: '
+-              f'{" ".join(shlex.quote(str(a)) for a in arguments)}', flush=True)
+-        sys.exit(result.returncode)
+-    return result.stdout.strip() if capture else result.returncode
+-
+-
+-def build():
+-    """build.sh in a CLANG64 login shell (its clang, cmake, ninja and pkg-config)."""
+-    bash = msys_root() / 'usr/bin/bash.exe'
+-    if not bash.is_file():
+-        sys.exit(f'MSYS2 not found at {msys_root()} (set BB_MSYS2, or BB_PREBUILT=1 with a built out/)')
+-    env = dict(os.environ, MSYSTEM='CLANG64', CHERE_INVOKING='1')
+-    run([bash, '-lc', 'bash build.sh'], env=env)
+-
+-
+-# The image the engine boots (prepare.py, link_libc.py, link_modules.py, content_profile.py):
+-# about 300 MB written and 235,000 relocations applied, the same every launch for the same game.
+-# It is made again only when what it is made from changes - the game's executable, modules and
+-# parameters, the content SKU, these scripts - and reused otherwise (out/prepared.json).
+-PREPARE_SCRIPTS = ('prepare.py', 'link_libc.py', 'link_modules.py', 'content_profile.py', 'game_check.py')
+-PREPARED = ('boot.bin', 'eboot.elf', 'entry.bin', 'analysis.json', 'boot-libc.bin', 'libc-link.json',
+-            'boot-linked.bin', 'link.json', 'content.bin', 'content-profile.json')
+-
+-
+-def prepare_key(game, sku):
+-    digest = hashlib.sha256()
+-    modules = sorted((game / 'sce_module').iterdir()) if (game / 'sce_module').is_dir() else []
+-    # patches/redzone.json: the stores link_modules.py moves below the red zone (Intel 12th gen+).
+-    for path in [game / 'eboot.bin', game / 'sce_sys/param.sfo', *modules, *(SCRIPTS / s for s in PREPARE_SCRIPTS),
+-                 ROOT / 'patches' / 'redzone.json']:
+-        digest.update(path.name.encode('utf-8') + b'\0')
+-        if path.is_file():
+-            with path.open('rb') as f:
+-                while chunk := f.read(1 << 20):
+-                    digest.update(chunk)
+-        digest.update(b'\0')
+-    digest.update(f'sku={sku};check={os.environ.get("BB_SKIP_GAME_CHECK", "")}'.encode('utf-8'))
+-    return digest.hexdigest()
+-
+-
+-def prepare_image(game, out):
+-    """The boot image for `game` in `out`: reused when unchanged, else made by the scripts."""
+-    started = time.monotonic()
+-    sku = os.environ.get('BB_CONTENT_SKU', 'full')
+-    stamp = out / 'prepared.json'
+-    key = prepare_key(game, sku)
+-    try:
+-        reusable = json.loads(stamp.read_text(encoding='utf-8')).get('key') == key
+-    except (OSError, ValueError, AttributeError):
+-        reusable = False
+-    if reusable and all((out / name).is_file() for name in PREPARED):
+-        print(f'Boot image unchanged: reused ({time.monotonic() - started:.1f} s)', flush=True)
+-        return
+-    stamp.unlink(missing_ok=True)  # a run stopped half way leaves no stamp behind
+-    for script, extra in (('prepare.py', []), ('link_libc.py', []), ('link_modules.py', []),
+-                          ('content_profile.py', ['--sku', sku])):
+-        run([PYTHON, SCRIPTS / script, game, '--out', out, *extra])
+-    stamp.write_text(json.dumps({'key': key}) + '\n', encoding='utf-8')
+-    print(f'Boot image prepared in {time.monotonic() - started:.1f} s (reused on later launches)', flush=True)
+-
+-
+-def settings_value(config, key):
+-    if not config.is_file():
+-        return None
+-    for line in config.read_text(errors='replace').splitlines():
+-        name, _, value = line.partition('=')
+-        if name.strip() == key:
+-            return value.strip()
+-    return None
+-
+-
+-def gpu_cache_dir(env=os.environ):
+-    """Where the engine keeps its shader and pipeline caches (bb-probe runs in ROOT)."""
+-    return Path(env.get('BB_GPU_USER_DIR', ROOT / 'user')) / 'cache'
+-
+-
+-def reset_stale_gpu_cache(cache, engine):
+-    """Deletes the shader and pipeline caches another engine build wrote. The engine checks them
+-    against the GPU only, so a damaged record or one from an older build was preloaded every
+-    session, through updates (characters' skin and hair missing in every save: GitHub issue 30).
+-    The first start of each engine rebuilds them, as after a driver update. The GPU driver's own
+-    cache (*.vkcache) stays: the engine checks it against the GPU and driver, and it holds only
+-    what the driver compiled, so the next start compiles less."""
+-    stamp = cache / 'engine.txt'
+-    try:
+-        if not engine or stamp.read_text(encoding='utf-8').strip() == engine:
+-            return False
+-    except OSError:
+-        pass
+-    removed = False
+-    if cache.is_dir():
+-        for entry in cache.iterdir():
+-            if entry == stamp or entry.suffix == '.vkcache':
+-                continue
+-            try:
+-                if entry.is_dir() and not entry.is_symlink():
+-                    shutil.rmtree(entry)
+-                else:
+-                    entry.unlink()
+-                removed = True
+-            except OSError as error:
+-                print(f'GPU cache: cannot remove {entry.name}: {error}', flush=True)
+-                return False
+-    cache.mkdir(parents=True, exist_ok=True)
+-    stamp.write_text(engine + '\n', encoding='utf-8')
+-    if removed:
+-        print(f'GPU cache: cleared for engine {engine}; shaders compile again on this start', flush=True)
+-    return removed
+-
+-
+-def configure_frame_rate(env):
+-    """Windows supports the tested fixed-timestep presets, including old config migration.
+-
+-    Explicit limits also override inherited BB_VBLANK_HZ=0 / BB_FPS_LIMIT=0 so a
+-    legacy uncapped launch cannot saturate the desktop during menus or loading.
+-    """
+-    fps = env.get('BB_FPS', '60')
+-    # Bloodborne PC: 120 and 144 are the 90 FPS++ patch with its frame-rate values for that rate
+-    # (patches.py SCALED_FPS; the uncapped patch froze Vicar Amelia's intro at any rate). 144 Hz
+-    # is above the vblank rates the engine paces on (it runs 480 Hz then); the limit holds 144.
+-    if fps in ('120', '144'):
+-        env.update(BB_FPS=fps, BB_FPS_LIMIT=fps, BB_VBLANK_HZ=fps)
+-        return fps
+-    # Other rates above 90 use the uncapped patch (with the sprint fix) and the frame limiter;
+-    # "uncap" runs unlimited unless BB_FPS_LIMIT asks for a cap.
+-    if fps == 'uncap' or (fps.isdigit() and int(fps) > 90):
+-        limit = fps if fps.isdigit() else env.get('BB_FPS_LIMIT', '0')
+-        env.update(BB_FPS='uncap', BB_FPS_LIMIT=limit if limit.isdigit() else '0', BB_VBLANK_HZ='0')
+-        return 'uncap'
+-    if fps not in ('30', '60', '90'):
+-        print(f'Unsupported Windows FPS preset {fps!r}; using 60 FPS.', flush=True)
+-        fps = '60'
+-    env.update(BB_FPS=fps, BB_FPS_LIMIT=fps, BB_VBLANK_HZ='90' if fps == '90' else '60')
+-    return fps
+-
+-
+-def main():
+-    arguments = sys.argv[1:]
+-    game = os.environ.get('BB_GAME_DIR')
+-    if arguments[:1] == ['--game-dir'] and len(arguments) > 1:
+-        game, arguments = arguments[1], arguments[2:]
+-    data = Path(os.environ.get('BB_DATA_DIR', ROOT))
+-    out = data / 'out'
+-    try:
+-        engine = json.loads((ROOT / 'package.json').read_text(encoding='utf-8-sig')).get('engine', '')
+-        reset_stale_gpu_cache(gpu_cache_dir(), engine)
+-    except (OSError, ValueError):
+-        pass
+-    out.mkdir(parents=True, exist_ok=True)
+-    os.environ.setdefault('BB_CONFIG', str(data / 'bbport.ini'))
+-    config = Path(os.environ['BB_CONFIG'])
+-    from online import configure_online, read_settings
+-    try:
+-        override = configure_online(read_settings(config) if config.exists() else {}, data, os.environ)
+-        print('Online: configured server profile and automatic game redirect' if override else 'Online: offline mode')
+-    except (OSError, ValueError) as error:
+-        sys.exit(f'Online configuration: {error}')
+-    if 'BB_FSR411_DIR' not in os.environ and not (ROOT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
+-        os.environ['BB_FSR411_DIR'] = str(data / 'fsr4_411')
+-    # FSR 4.1.1 on any GPU: the fsr4vk provider DLL the package ships (vk_fsr4vk.cpp). The engine
+-    # looks beside bb-probe.exe without this; the package keeps it at its top.
+-    if 'BB_FSR4VK_DIR' not in os.environ and (ROOT / 'fsr4vk' / 'amd_fidelityfx_upscaler_vk.dll').is_file():
+-        os.environ['BB_FSR4VK_DIR'] = str(ROOT / 'fsr4vk')
+-    # The last folder that worked is remembered, so run.bat alone starts the game afterwards.
+-    remembered = out / 'game_dir.txt'
+-    if not game and remembered.is_file():
+-        game = remembered.read_text(encoding='utf-8').strip()
+-    game = Path(game) if game else ROOT.parent / 'CUSA03173'
+-    if not (game / 'eboot.bin').is_file():
+-        sys.exit(f'No eboot.bin in {game} (pass --game-dir or set BB_GAME_DIR).')
+-    original = game.resolve()
+-    remembered.write_text(str(original), encoding='utf-8')
+-    os.environ['BB_GAME_DIR'] = str(original)
+-    # The in-game menu's "Apply and restart" runs this launcher again (probe.c runtime_restart).
+-    os.environ['BB_RESTART_COMMAND'] = subprocess.list2cmdline([PYTHON, str(Path(__file__).resolve()), *sys.argv[1:]])
+-
+-    merged = Path(run([PYTHON, SCRIPTS / 'mods.py', original, '--out', out,
+-                       '--mods-dir', os.environ.get('BB_MODS_DIR', data / 'mods'),
+-                       '--config', os.environ.get('BB_MODS_CONFIG', data / 'mods.json'),
+-                       '--enabled', os.environ.get('BB_MODS_ENABLED', '1')], capture=True))
+-    overlay = merged if merged.resolve() != original else None
+-    # The first files the game reads: without them it crashes a second after opening.
+-    core = ('dvdroot_ps4/shader/gxshader.shaderbnd.dcx', 'dvdroot_ps4/other/systex.tpf.dcx')
+-    missing = [name for name in core if not (merged / name).is_file()]
+-    if missing and overlay and all((original / name).is_file() for name in core):
+-        print('Mods: the merged game lost its own files; starting without mods', flush=True)
+-        remove_overlay(overlay)
+-        merged, overlay, missing = original, None, []
+-    if missing:
+-        if overlay:
+-            remove_overlay(overlay)
+-        sys.exit(f'The game folder {original} is incomplete: {", ".join(missing)} missing. '
+-                 'Dump or extract the game again (base game plus the 1.09 update).')
+-    try:
+-        prepare_image(merged, out)
+-        prebuilt = os.environ.get('BB_PREBUILT') == '1'
+-        if not prebuilt:
+-            build()
+-        # Engine features are prepared locally and only mounted after runtime byte checks.
+-        for key in ('BB_DREAM_MIRROR_ASSET', 'BB_ENGINE_IMAGE_SHA256', 'BB_PC_MENU_ASSETS', 'BB_REBIRTH_ASSET'):
+-            os.environ.pop(key, None)
+-        # bbport: the engine's own features - picture tuning, cheats, trophies from a save, the
+-        # online fixes - all check the executable first, so it is always verified (~0.1 s).
+-        try:
+-            from engine_assets import prepare_mirror, verify_executable
+-            os.environ['BB_ENGINE_IMAGE_SHA256'] = verify_executable(out / 'eboot.elf')
+-            if settings_value(config, 'change_appearance') == '1':
+-                asset = prepare_mirror(merged, out / 'eboot.elf', data / 'engine-assets')
+-                os.environ['BB_DREAM_MIRROR_ASSET'] = str(asset)
+-                print(f'Engine: Dream mirror prepared locally: {asset}', flush=True)
+-            if (any(settings_value(config, key) == '1' for key in ('change_appearance', 'camera_controls', 'rebirth', 'graphics_controls'))
+-                or any(settings_value(config, key) != '0' for key in ('pc_controls', 'widescreen'))):
+-                from engine_assets import prepare_menu_assets
+-                try:
+-                    menus = prepare_menu_assets(merged, out / 'eboot.elf', data / 'engine-assets',
+-                                                out / 'bb-engine-assets.exe', rebirth=settings_value(config, 'rebirth') == '1')
+-                    os.environ['BB_PC_MENU_ASSETS'] = str(menus)
+-                    print(f'Engine: native PC menus prepared locally: {menus}', flush=True)
+-                    if settings_value(config, 'rebirth') == '1':
+-                        os.environ['BB_REBIRTH_ASSET'] = str(menus / 'dvdroot_ps4/script/talk/m24_02_00_00.talkesdbnd.dcx')
+-                except (OSError, ValueError) as error:
+-                    print(f'Engine: native PC menus disabled: {error}', flush=True)
+-        except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
+-            print(f'Engine: enhancement preparation skipped: {error}', flush=True)
+-        # output_res = auto: the display's own size, for the scene size below and the engine.
+-        if not os.environ.get('BB_DISPLAY_SIZE'):
+-            size = display_size()
+-            if size:
+-                os.environ['BB_DISPLAY_SIZE'] = f'{size[0]}x{size[1]}'
+-                if (settings_value(config, 'output_res') or '').lower() == 'auto':
+-                    print(f'Output resolution: the display\'s own, {size[0]}x{size[1]}', flush=True)
+-        # Sizes chosen below for the previous launch are recomputed after an in-game restart.
+-        if os.environ.get('BB_AUTO_RENDER_RES') == '1':
+-            for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):
+-                os.environ.pop(key, None)
+-        fps = configure_frame_rate(os.environ)
+-        scaled_render = scaled_output = None
+-        if not os.environ.get('BB_RENDER_RES'):
+-            sizes = run([PYTHON, SCRIPTS / 'patches.py', '--print-scaled', '--settings', config], capture=True, check=False)
+-            if sizes and len(sizes.split()) == 2:
+-                scaled_render, scaled_output = sizes.split()
+-        live = '0'
+-        if scaled_output:
+-            live = os.environ.get('BB_LIVE_RES') or settings_value(config, 'live_resolution') or '0'
+-            if live == 'auto':
+-                caps = out / 'bb-gpu-capabilities.exe'
+-                live = run([caps, '--live-resolution'], capture=True, check=False) or '0'
+-            live = '1' if live == '1' else '0'
+-        if live == '1':
+-            print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
+-        elif scaled_output:
+-            os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
+-            # The extra 4 GiB is for scenes above 1080p only: Windows counts the whole pool
+-            # against RAM plus page file from the start, used or not. The scene, not the output:
+-            # the output exists only on the host side (the upscaler fills it), and the game's UI
+-            # stays 1920x1080. A 1440p output with a Quality upscaler (a 1706x960 scene) asked for
+-            # 10 GB at start and failed on PCs with 16 GB (Windows error 1450).
+-            if large_scene(scaled_render):
+-                os.environ.setdefault('BB_DMEM_MB', '9152')
+-            dmem = os.environ.get('BB_DMEM_MB', '5056')
+-            print(f'Output {scaled_output}: scene {scaled_render}, direct memory {dmem} MiB '
+-                  '(live_resolution=1: live changes)')
+-        run([PYTHON, SCRIPTS / 'patches.py', '--out', out, '--fps', fps, '--extra', os.environ.get('BB_PATCHES', ''),
+-             '--settings', config, '--game-dir', merged, '--render-res', os.environ.get('BB_RENDER_RES', ''),
+-             '--output-res', os.environ.get('BB_OUTPUT_RES', ''),
+-             '--patches-dir', os.environ.get('BB_PATCHES_DIR', data / 'patches'),
+-             '--patches-config', os.environ.get('BB_PATCHES_CONFIG', data / 'patches.json')])
+-        # bbport: a patch that enlarges the game's heaps (a resolution patch above 1080p chosen in
+-        # the patches list, with a 1080p output here) overflows the 5056 MiB pool at start.
+-        try:
+-            info = json.loads((out / 'patches-info.json').read_text(encoding='utf-8'))
+-        except (OSError, ValueError):
+-            info = {}
+-        heaps = info.get('heap_patch')
+-        # The UI movie viewport the patches gave the game (patches.py ui_size): the renderer
+-        # recognizes the UI pass by it and fits it to the output (ui_composition.h).
+-        if info.get('ui_size', '1920x1080') != '1920x1080':
+-            os.environ['BB_UI_SIZE'] = info['ui_size']
+-            print(f"Widescreen: UI viewport {info['ui_size']} (the 16:9 stage centred in it)", flush=True)
+-        else:
+-            os.environ.pop('BB_UI_SIZE', None)
+-        if heaps and 'BB_DMEM_MB' not in os.environ:
+-            os.environ['BB_DMEM_MB'] = '9152'
+-            print("Patches: the game's heaps are enlarged; direct memory 9152 MiB", flush=True)
+-        probe = ROOT / os.environ.get('BB_PROBE', out / 'bb-probe.exe')
+-        command = [probe, out / 'boot-linked.bin', '--content-profile', out / 'content.bin',
+-                   '--patches', out / 'patches.bin', '--app0', merged,
+-                   '--user', os.environ.get('BB_USER_DIR', data / 'user'),
+-                   '--timeout', os.environ.get('BB_TIMEOUT', '0'), *arguments]
+-        # MSYS2's DLLs (libc++, SDL3, FFmpeg, ...). System32 is searched before PATH, so the
+-        # Vulkan loader stays the one installed with the GPU driver.
+-        os.environ['PATH'] = os.pathsep.join([str(msys_root() / 'clang64/bin'), os.environ.get('PATH', '')])
+-        print('Starting:', ' '.join(shlex.quote(str(c)) for c in command), flush=True)
+-        try:
+-            status = subprocess.call(
+-                [str(c) for c in command],
+-                cwd=ROOT,
+-                stdout=LOG_STREAM,
+-                stderr=LOG_STREAM,
+-            )
+-        except KeyboardInterrupt:
+-            status = 130
+-        print(f'bb-probe exited with code {status}', flush=True)
+-        # Windows crash codes (0xC0000005) do not fit sys.exit: pass them on as the signed
+-        # 32-bit value the launcher reads, not -1.
+-        return status - (1 << 32) if status >= (1 << 31) else status
+-    finally:
+-        if overlay:
+-            remove_overlay(overlay)
+ 
++from run_game import *  # noqa: F401,F403
++from run_game import init_session_log, main
+ 
+ if __name__ == '__main__':
+     init_session_log()
+diff --git a/src/host_sync.h b/src/host_sync.h
+index 7c90dfb..423f4e4 100644
+--- a/src/host_sync.h
++++ b/src/host_sync.h
+@@ -109,8 +109,13 @@ typedef pthread_t HostThreadId;
+ static inline HostThreadId host_thread_id(void) { return pthread_self(); }
+ static inline int host_thread_equal(HostThreadId a, HostThreadId b) { return pthread_equal(a, b); }
+ static inline void host_yield(void) { sched_yield(); }
+-/* Raising a thread's priority needs privileges on Linux: left to the scheduler. */
+-static inline void host_thread_set_high_priority(int high) { (void)high; }
++/* The calling thread above the others (1) or back at normal priority (0): its nice level
++ * (runtime_host.c), as far as the system allows. */
++void host_thread_set_high_priority(int high);
++/* The calling thread `levels` nice levels above the process's own (0: back to it); as many as
++ * the system allows. 0 when it is raised by at least one level (the GPU library's render chain
++ * uses it too, bbport_platform.cpp). */
++int host_thread_raise(int levels);
+ typedef pthread_t HostThread;
+ #endif
+ 
+diff --git a/src/runtime.c b/src/runtime.c
+index 8bdbf7a..a96cda6 100644
+--- a/src/runtime.c
++++ b/src/runtime.c
+@@ -1,4 +1,5 @@
+ /* Narrow, explicit PS4 libc contracts. No automatic success stubs. */
++#define _GNU_SOURCE
+ #define _CRT_RAND_S
+ #include "runtime.h"
+ #include "gpu/bbgpu.h"
+diff --git a/src/runtime.h b/src/runtime.h
+index 035ae4d..3a230f3 100644
+--- a/src/runtime.h
++++ b/src/runtime.h
+@@ -105,6 +105,8 @@ uintptr_t runtime_pad_resolve(const char *name);
+ void runtime_pad_report(void);
+ uintptr_t runtime_rtc_resolve(const char *name);
+ const char *runtime_file_user_dir(void);
++/* runtime_trophies.c: a trophy into <user>/trophies.log (and a notification for a new unlock). */
++void runtime_trophy_record(int id, int earned_in_save);
+ void runtime_savedata_configure(const char *title);
+ uintptr_t runtime_savedata_resolve(const char *name);
+ void runtime_savedata_report(void);
+diff --git a/src/runtime_content.c b/src/runtime_content.c
+index cc64b6f..11d4484 100644
+--- a/src/runtime_content.c
++++ b/src/runtime_content.c
+@@ -1,6 +1,9 @@
+ /* Offline AppContent provider for the configured base-game profile.
+  * No package/DLC mounting, downloads, entitlement or license emulation; dumped add-ons are
+  * reported installed (see find_addons). */
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
+ #include "runtime.h"
+ #include <ctype.h>
+ #include <dirent.h>
+diff --git a/src/runtime_host.c b/src/runtime_host.c
+index f783d21..66f4a59 100644
+--- a/src/runtime_host.c
++++ b/src/runtime_host.c
+@@ -143,7 +143,42 @@ void host_sleep_ns(uint64_t ns) {
+ }
+ #else
+ #include <pthread.h>
++#include <stdio.h>
++#include <sys/resource.h>
+ #include <time.h>
++#include <unistd.h>
++
++/* Linux schedules each thread by its own nice level, counted from the process's (a session or
++ * ananicy may start the game below 0 already). Going lower than the process needs RLIMIT_NICE
++ * (ulimit -e; 31 allows down to -11) or CAP_SYS_NICE: when the full step is refused the thread
++ * goes as far as the limit allows. */
++static int process_nice(void) {
++    static int base = 100;
++    if (base == 100) {
++        errno = 0;
++        const int nice = getpriority(PRIO_PROCESS, (id_t)getpid());
++        base = errno ? 0 : nice;
++    }
++    return base;
++}
++int host_thread_raise(int levels) {
++    const int base = process_nice();
++    int target = base - levels < -20 ? -20 : base - levels;
++    if (setpriority(PRIO_PROCESS, (id_t)gettid(), target) == 0) return levels > 0 ? 0 : -1;
++    if (levels <= 0) return -1;
++    struct rlimit limit;
++    if (getrlimit(RLIMIT_NICE, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY) return -1;
++    target = 20 - (int)limit.rlim_cur; /* the lowest nice level the limit allows */
++    return target < base && setpriority(PRIO_PROCESS, (id_t)gettid(), target) == 0 ? 0 : -1;
++}
++/* 10 levels: well above the game's other threads, as Windows' THREAD_PRIORITY_HIGHEST. */
++void host_thread_set_high_priority(int high) {
++    if (host_thread_raise(high ? 10 : 0) != 0 && high) {
++        static int noted;
++        if (!__atomic_exchange_n(&noted, 1, __ATOMIC_RELAXED))
++            printf("Runtime: audio threads stay at normal priority: this system allows no higher one (ulimit -e)\n");
++    }
++}
+ 
+ int host_thread_start(HostThread *thread, size_t stack, void *(*entry)(void *), void *argument) {
+     pthread_attr_t attr;
+diff --git a/src/runtime_services.c b/src/runtime_services.c
+index 42c1225..fa56f4e 100644
+--- a/src/runtime_services.c
++++ b/src/runtime_services.c
+@@ -299,6 +299,7 @@ static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options)
+ static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
+     (void)ctx; (void)handle;
+     printf("Runtime: trophy %d unlocked\n",id);
++    runtime_trophy_record(id,0);
+     if (platinum) *platinum=-1;
+     return 0;
+ }
+diff --git a/src/runtime_trophies.c b/src/runtime_trophies.c
+new file mode 100644
+index 0000000..5c7794a
+--- /dev/null
++++ b/src/runtime_trophies.c
+@@ -0,0 +1,141 @@
++/* Trophies the game unlocks (sceNpTrophyUnlockTrophy, runtime_services.c) and the ones a loaded
++ * save had already earned (gpu/shim/engine/trophy_sync.cpp) are kept in <user>/trophies.log, one
++ * "id unix-time" line each (the launcher's own format, launcher/windows/.../Core/Trophies.cs), so
++ * they count whoever started the game. An unlock also shows a desktop notification (notify-send)
++ * on Linux, unless BB_TROPHY_NOTIFY=0: the launcher sets it when it shows its own. */
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
++#include "runtime.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#ifndef _WIN32
++#include <pthread.h>
++#include <spawn.h>
++#include <sys/wait.h>
++extern char **environ;
++#endif
++
++/* The game's trophy ids (TROP.SFM order), as Core/Trophies.cs names them. */
++static const struct { const char *name, *grade; } trophies[] = {
++    {"Bloodborne", "Platinum"}, /* 0 */
++    {"Yharnam Sunrise", "Gold"}, /* 1 */
++    {"Honoring Wishes", "Gold"}, /* 2 */
++    {"Childhood's Beginning", "Gold"}, /* 3 */
++    {"Yharnam, Pthumerian Queen", "Gold"}, /* 4 */
++    {"Hunter's Essence", "Gold"}, /* 5 */
++    {"Hunter's Craft", "Gold"}, /* 6 */
++    {"Weapon Master", "Silver"}, /* 7 */
++    {"Blood Gem Master", "Silver"}, /* 8 */
++    {"Rune Master", "Silver"}, /* 9 */
++    {"Cainhurst", "Silver"}, /* 10 */
++    {"The Choir", "Silver"}, /* 11 */
++    {"The Source of the Dream", "Silver"}, /* 12 */
++    {"Nightmare Lecture Building", "Silver"}, /* 13 */
++    {"Father Gascoigne", "Bronze"}, /* 14 */
++    {"Vicar Amelia", "Bronze"}, /* 15 */
++    {"Shadow of Yharnam", "Bronze"}, /* 16 */
++    {"Rom, the Vacuous Spider", "Bronze"}, /* 17 */
++    {"The One Reborn", "Bronze"}, /* 18 */
++    {"Micolash, Host of the Nightmare", "Bronze"}, /* 19 */
++    {"Mergo's Wet Nurse", "Bronze"}, /* 20 */
++    {"Cleric Beast", "Bronze"}, /* 21 */
++    {"Blood-starved Beast", "Bronze"}, /* 22 */
++    {"The Witch of Hemwick", "Bronze"}, /* 23 */
++    {"Darkbeast Paarl", "Bronze"}, /* 24 */
++    {"Amygdala", "Bronze"}, /* 25 */
++    {"Martyr Logarius", "Bronze"}, /* 26 */
++    {"Celestial Emissary", "Bronze"}, /* 27 */
++    {"Ebrietas, Daughter of the Cosmos", "Bronze"}, /* 28 */
++    {"Blood Gem Contact", "Bronze"}, /* 29 */
++    {"Rune Contact", "Bronze"}, /* 30 */
++    {"Chalice of Pthumeru", "Bronze"}, /* 31 */
++    {"Chalice of Ailing Loran", "Bronze"}, /* 32 */
++    {"Chalice of Isz", "Bronze"}, /* 33 */
++    {"Old Hunter's Essence", "Gold"}, /* 34 */
++    {"Orphan of Kos", "Silver"}, /* 35 */
++    {"Ludwig, the Holy Blade", "Bronze"}, /* 36 */
++    {"Lady Maria of the Astral Clocktower", "Bronze"}, /* 37 */
++    {"Living Failures", "Bronze"}, /* 38 */
++    {"Laurence, the First Vicar", "Bronze"}, /* 39 */
++};
++enum { TROPHY_COUNT = (int)(sizeof(trophies) / sizeof(trophies[0])) };
++
++static HostMutex lock = HOST_MUTEX_INIT;
++static int loaded;
++static unsigned char known[TROPHY_COUNT];
++
++static void log_path(char *path, size_t size) { snprintf(path, size, "%s/trophies.log", runtime_file_user_dir()); }
++
++/* The ids trophies.log already has (once, under the lock). */
++static void load_known(void) {
++    if (loaded) return;
++    loaded = 1;
++    char path[4096];
++    log_path(path, sizeof(path));
++    FILE *file = fopen(path, "r");
++    if (!file) return;
++    int id;
++    long long when;
++    char line[128];
++    while (fgets(line, sizeof(line), file))
++        if (sscanf(line, "%d %lld", &id, &when) == 2 && id >= 0 && id < TROPHY_COUNT) known[id] = 1;
++    fclose(file);
++}
++
++#ifndef _WIN32
++/* notify-send on a thread of its own, which waits for it: the game's thread never blocks on it
++ * and no finished process is left unreaped. */
++static void *notify_thread(void *arg) {
++    char *text = arg;
++    char *body = strchr(text, '\n');
++    if (body) *body++ = 0;
++    char *argv[] = {"notify-send", "--app-name=Bloodborne", "--icon=trophy-gold", "--expire-time=6000",
++                     text, body ? body : "", NULL};
++    pid_t pid;
++    if (posix_spawnp(&pid, "notify-send", NULL, NULL, argv, environ) == 0) {
++        int status;
++        waitpid(pid, &status, 0);
++    }
++    free(text);
++    return NULL;
++}
++
++static void notify(int id) {
++    const char *setting = getenv("BB_TROPHY_NOTIFY");
++    if (setting && !strcmp(setting, "0")) return;
++    char *text = malloc(256);
++    if (!text) return;
++    snprintf(text, 256, "%s (%s)\nYou have earned a trophy!", trophies[id].name, trophies[id].grade);
++    pthread_t thread;
++    pthread_attr_t attributes;
++    pthread_attr_init(&attributes);
++    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
++    if (pthread_create(&thread, &attributes, notify_thread, text) != 0) free(text);
++    pthread_attr_destroy(&attributes);
++}
++#endif
++
++void runtime_trophy_record(int id, int earned_in_save) {
++    if (id < 0 || id >= TROPHY_COUNT) return;
++    host_lock(&lock);
++    load_known();
++    const int fresh = !known[id];
++    if (fresh) {
++        known[id] = 1;
++        char path[4096];
++        log_path(path, sizeof(path));
++        FILE *file = fopen(path, "a");
++        if (file) {
++            fprintf(file, "%d %lld\n", id, (long long)time(NULL));
++            fclose(file);
++        }
++    }
++    host_unlock(&lock);
++#ifndef _WIN32
++    /* A save's earlier trophies are recorded quietly; a new unlock is announced once. */
++    if (fresh && !earned_in_save) notify(id);
++#endif
++}
+diff --git a/tests/test_file_mods.c b/tests/test_file_mods.c
+index f45a1fc..b75d779 100644
+--- a/tests/test_file_mods.c
++++ b/tests/test_file_mods.c
+@@ -6,6 +6,7 @@ int32_t *runtime_errno(void) { return &guest_errno; }
+ int32_t runtime_guest_errno(int e) { return e; }
+ /* Reads into guest memory tell the GPU side (runtime_memory.c); nothing to tell here. */
+ void runtime_memory_note_write(uintptr_t address, uint64_t size) { (void)address; (void)size; }
++int runtime_memory_guest_writable(uintptr_t address, uint64_t size) { (void)address; (void)size; return 1; }
+ uintptr_t runtime_lookup(const RuntimeExport *table,size_t n,const char *name) {
+     for (size_t i=0;i<n;++i) if (!strcmp(table[i].name,name)) return (uintptr_t)table[i].function;
+     return 0;
+diff --git a/tests/test_gpu_runtime_stubs.cpp b/tests/test_gpu_runtime_stubs.cpp
+index 45ea45d..93a337f 100644
+--- a/tests/test_gpu_runtime_stubs.cpp
++++ b/tests/test_gpu_runtime_stubs.cpp
+@@ -50,5 +50,11 @@ int runtime_memory_direct_phys(uintptr_t, uint64_t*, uintptr_t*) { std::abort();
+ void runtime_wait_report(double) {}
+ void runtime_sleep_stats(uint64_t* calls, uint64_t* ns) { *calls = 0; *ns = 0; }
+ uint64_t runtime_heap_growths() { return 0; }
++// No controller in renderer tests: no pad type, no bound button (the game's own icons).
++int runtime_pad_type() { return 0; }
++int runtime_pad_button(uint32_t, int) { return -1; }
++[[noreturn]] void runtime_thread_exit(void*) { std::abort(); }
++void runtime_trophy_record(int, int) {}
++int host_thread_raise(int) { return -1; }
+ }
+ 
+diff --git a/tests/test_mods.py b/tests/test_mods.py
+index 7ac21ac..59622f1 100644
+--- a/tests/test_mods.py
++++ b/tests/test_mods.py
+@@ -176,9 +176,13 @@ class ModTests(unittest.TestCase):
+         self.mod('A')
+         python = self.root / 'python'
+         python.write_text(f'#!{sys.executable}\nimport subprocess,sys\n'
+-            'if sys.argv[1] == "scripts/mods.py" or sys.argv[1] == "-c":\n'
++            'if sys.argv[1] in ("scripts/run_game.py", "-c") or sys.argv[1].endswith("mods.py"):\n'
+             '    sys.exit(subprocess.call([sys.executable,*sys.argv[1:]]))\n')
+         python.chmod(0o755)
++        # The first files the game reads (run_game.py checks the merged game has them).
++        for name in ('dvdroot_ps4/shader/gxshader.shaderbnd.dcx', 'dvdroot_ps4/other/systex.tpf.dcx'):
++            (self.game / name).parent.mkdir(parents=True, exist_ok=True)
++            (self.game / name).write_bytes(b'core')
+         probe = self.root / 'probe'
+         probe.write_text(f'#!{sys.executable}\nimport json,sys,os\nfrom pathlib import Path\n'
+             'game=Path(sys.argv[sys.argv.index("--app0")+1])\n'
+diff --git a/tests/test_pad.c b/tests/test_pad.c
+index 147d1b7..319ec04 100644
+--- a/tests/test_pad.c
++++ b/tests/test_pad.c
+@@ -87,6 +87,10 @@ int main(void) {
+     SDL_UpdateGamepads();
+     assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==480);
+     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_TOUCHPAD,false));
++    /* Buttons held when the menu let go stay hidden until all are released (hold_after_capture). */
++    SDL_UpdateJoysticks();
++    SDL_UpdateGamepads();
++    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_EAST,true));
+     assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,true));
+     assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,32767));
+diff --git a/tests/test_run_settings.py b/tests/test_run_settings.py
+index f6e80bf..972b26f 100644
+--- a/tests/test_run_settings.py
++++ b/tests/test_run_settings.py
+@@ -25,6 +25,10 @@ class RestartResolutionTests(unittest.TestCase):
+             struct.pack_into('<IIQQQQQQ', elf, 64, 1, 0, 0, 0, 0, 0, 0x6000000, 0)
+             (out / 'eboot.elf').write_bytes(elf)
+             (data / 'eboot.bin').touch()
++            # The first files the game reads (run_game.py checks the game has them).
++            for name in ('dvdroot_ps4/shader/gxshader.shaderbnd.dcx', 'dvdroot_ps4/other/systex.tpf.dcx'):
++                (data / name).parent.mkdir(parents=True, exist_ok=True)
++                (data / name).write_bytes(b'core')
+             config = data / 'bbport.ini'
+             config.write_text('upscaler=fsr3\npreset=1\noutput_res=1280x720\n' + ini_extra)
+             if caps is not None:  # the GPU check next to the probe (live_resolution=auto)
+@@ -34,7 +38,7 @@ class RestartResolutionTests(unittest.TestCase):
+             python = data / 'python'
+             python.write_text(f'#!{sys.executable}\n' +
+                 'import subprocess, sys\n'
+-                'if sys.argv[1] in ("scripts/patches.py", "scripts/mods.py"):\n'
++                'if sys.argv[1] == "scripts/run_game.py" or sys.argv[1].endswith(("patches.py", "mods.py")):\n'
+                 '    sys.exit(subprocess.call([sys.executable, *sys.argv[1:]]))\n')
+             python.chmod(0o755)
+             probe = data / 'probe'
+diff --git a/tests/test_upscaler_support.cpp b/tests/test_upscaler_support.cpp
+index 66bd7e6..4260fc1 100644
+--- a/tests/test_upscaler_support.cpp
++++ b/tests/test_upscaler_support.cpp
+@@ -40,9 +40,13 @@ int main() {
+                 Load();
+                 assert(s.upscaler == requested);
+                 ConfigureUpscalerSupport(fsr4, fsr411);
++                // No DLSS here (no NVIDIA RTX GPU): FSR 3.1. FSR 4.1.1 falls back to FSR 4 when
++                // FSR 4 runs, else to FSR 3.1.
+                 const bool unsupported = (requested == UpscalerFsr4 && !fsr4) ||
+-                    (requested == UpscalerFsr411 && !(fsr4 && fsr411));
+-                assert(s.upscaler == (unsupported ? UpscalerFsr3 : requested));
++                    (requested == UpscalerFsr411 && !(fsr4 && fsr411)) || requested == UpscalerDlss;
++                const int fallback =
++                    requested == UpscalerFsr411 && fsr4 ? int(UpscalerFsr4) : int(UpscalerFsr3);
++                assert(s.upscaler == (unsupported ? fallback : requested));
+                 assert(s.fsr4_supported == fsr4);
+                 assert(s.fsr411_supported == (fsr4 && fsr411));
+                 assert(bool(s.fsr4_problem.load()) == unsupported);
+@@ -50,7 +54,7 @@ int main() {
+                 // Startup patch settings still describe the already applied guest patches.
+                 assert(s.startup_upscaler == requested);
+                 ConfigureUpscalerSupport(fsr4, fsr411);
+-                assert(s.upscaler == (unsupported ? UpscalerFsr3 : requested));
++                assert(s.upscaler == (unsupported ? fallback : requested));
+             }
+         }
+     }
+diff --git a/tools/gpu_capabilities.c b/tools/gpu_capabilities.c
+index 6c1d75e..4184fda 100644
+--- a/tools/gpu_capabilities.c
++++ b/tools/gpu_capabilities.c
+@@ -1,7 +1,9 @@
+ /* Check whether native-size depth/stencil images can be blitted to reduced
+  * renderer targets. The renderer needs both directions for live presets.
+  * --gamepads: the connected gamepads, "GUID<tab>name" per line (the launcher's controller list,
+- * BB_GAMEPAD). --read-input: one key or button for the launcher's controls (below). */
++ * BB_GAMEPAD). --read-input: one key or button for the launcher's controls (below).
++ * --display-size: the primary display's size in pixels, "WxH" (output_res = auto on Linux,
++ * scripts/run_game.py; Windows reads it from the system there). */
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -165,7 +167,28 @@ static int read_input(const char *kind) {
+     return 0;
+ }
+ 
++/* The desktop mode of the primary display, in pixels (a scaled Wayland output reports its
++ * logical size with a pixel density). */
++static int display_size(void) {
++    if (!SDL_Init(SDL_INIT_VIDEO)) {
++        fprintf(stderr, "display size: %s\n", SDL_GetError());
++        return 1;
++    }
++    const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
++    int status = 1;
++    if (mode && mode->w > 0 && mode->h > 0) {
++        const float density = mode->pixel_density > 0 ? mode->pixel_density : 1.0f;
++        printf("%dx%d\n", (int)(mode->w * density + 0.5f), (int)(mode->h * density + 0.5f));
++        status = 0;
++    }
++    SDL_Quit();
++    return status;
++}
++
+ int main(int argc, char **argv) {
++    if (argc > 1 && !strcmp(argv[1], "--display-size")) {
++        return display_size();
++    }
+     if (argc > 1 && !strcmp(argv[1], "--read-input")) {
+         return read_input(argc > 2 ? argv[2] : "any");
+     }

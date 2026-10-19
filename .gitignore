@@ -8,3 +8,6 @@ dist/
 .vs/
 .idea/
 launcher/windows/install.txt
+
+# The Linux engine, made by engineLinux/setup.sh
+engineLinux/bloodborne_pc/

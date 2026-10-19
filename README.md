@@ -1,29 +1,68 @@
 # Bloodborne PC
-<a href="https://trendshift.io/repositories/302591?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-302591" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/302591/daily?language=C%23" alt="Awakenchan%2FBloodBorneButPc | Trendshift" width="250" height="55"/></a>
 
-Bloodborne on Windows: a launcher and my engine, built on bbport and shadPS4 and reworked by me for performance.
-
-> **Note:** I'm keeping this going on my own, and updates are slower now because of the hate I've been getting. I'll keep working on it when I can.
+Bloodborne on Windows and Linux: [Awakenchan](https://github.com/Awakenchan)'s launcher and engine
+([Awakenchan/BloodBorneButPc](https://github.com/Awakenchan/BloodBorneButPc)), built on bbport and shadPS4,
+with a native Linux build: the engine built and run on Linux, and the launcher ported to Avalonia.
 
 **No game files are included.** You need your own decrypted Bloodborne dump (CUSA03173) with update 1.09.
 
 ## Install
 
-1. Download `BloodbornePC-<version>-win64.zip` from [Releases](https://github.com/Awakenchan/BloodBorneButPc/releases) and extract it anywhere.
+### Windows
+
+1. Download `BloodbornePC-<version>-win64.zip` from [Awakenchan's Releases](https://github.com/Awakenchan/BloodBorneButPc/releases) and extract it anywhere.
 2. Run `Bloodborne Launcher.exe` and pick your game folder (the one with `eboot.bin`).
 3. Press **Play**. The launcher updates itself.
+
+### Linux
+
+**AppImage** (one file, nothing to install):
+
+1. Download `BloodbornePC-x86_64.AppImage` from [Releases](https://github.com/Niko-Cloud/BloodBorneButPc/releases).
+2. `chmod +x BloodbornePC-x86_64.AppImage` and run it (or double-click it).
+3. Pick your game folder on the Play page and press **Play**. The launcher offers new releases; **Update** installs them.
+
+It needs a Vulkan driver and Python 3, which gaming setups have. Settings, saves and mods are kept in
+`~/.local/share/bloodborne-pc`. For co-op behind a firewall (ufw is on by default on some distributions), allow
+the game's port once: `sudo ufw allow 3658/udp`.
+
+**Build the AppImage yourself:** install the engine's build packages ([engineLinux/README.md](engineLinux/README.md))
+and the .NET 10 SDK, then:
+
+```bash
+git clone https://github.com/Niko-Cloud/BloodBorneButPc
+cd BloodBorneButPc
+bash packaging/appimage.sh   # sets up and builds the engine, then dist/BloodbornePC-x86_64.AppImage
+```
+
+**Run from source** (for working on it):
+
+```bash
+bash engineLinux/setup.sh
+cd engineLinux/bloodborne_pc && bash build.sh && cd ../..
+cd launcher/linux && dotnet run
+```
+
+The launcher finds the engine in `engineLinux/bloodborne_pc` by itself. Without the launcher:
+`BB_GAME_DIR=/path/to/CUSA03173 bash run.sh` in `engineLinux/bloodborne_pc`.
+
+The folders: `launcher/windows` and `engine` are the Windows launcher and engine, as in Awakenchan's repository;
+`launcher/linux` is the Linux launcher (Avalonia, sharing the Windows launcher's `Core`), and `engineLinux` the
+Linux engine's changes on top of `engine`'s (see its README).
 
 ## Credits
 
 | | |
 |---|---|
+| Launcher and engine changes | [Awakenchan/BloodBorneButPc](https://github.com/Awakenchan/BloodBorneButPc) |
 | Engine starting point | [DarkIzuku/bloodborne_pc](https://github.com/DarkIzuku/bloodborne_pc) (built on [bbport](https://github.com/deadinside28/bloodborne_pc) and [shadPS4](https://github.com/shadps4-emu/shadPS4)) |
+| Linux port (engine build, Avalonia launcher) | [Niko-Cloud](https://github.com/Niko-Cloud) |
 | VRAM cleanup | adapted from [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR) |
 | Crash and controller fixes | adapted from [AwesomeObserver](https://github.com/AwesomeObserver/bloodborne_pc), [Supermedo](https://github.com/Supermedo/bloodborne_pc) and [deadinside28](https://github.com/deadinside28/bloodborne_pc) |
 | Cheats and occlusion culling research | [droogie/bbhost](https://github.com/droogie/bbhost) |
 | Controller mappings | [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) |
 | Trophy list | [pyL1nx/bloodborne_pc](https://github.com/pyL1nx/bloodborne_pc) |
-| UI library | [WPF-UI](https://github.com/lepoco/wpfui) |
+| UI libraries | [WPF-UI](https://github.com/lepoco/wpfui) (Windows), [Avalonia](https://github.com/AvaloniaUI/Avalonia) and [FluentIcons](https://github.com/davidxuang/FluentIcons) (Linux) |
 
 ## License
 

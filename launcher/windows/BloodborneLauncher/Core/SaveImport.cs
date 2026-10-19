@@ -71,6 +71,8 @@ namespace BloodborneLauncher.Core
             {
                 (Path.Combine(appData, "shadPS4"), "shadPS4"),
                 (Path.Combine(documents, "shadPS4"), "shadPS4"),
+                // Linux: ~/.local/share/shadPS4 (appData is ~/.config there).
+                (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "shadPS4"), "shadPS4"),
             };
             var ours = Path.GetFullPath(Target(s));
             return roots.Where(r => Directory.Exists(r.Item1))

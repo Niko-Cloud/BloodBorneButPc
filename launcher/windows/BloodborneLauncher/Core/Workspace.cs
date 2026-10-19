@@ -1,5 +1,9 @@
 ﻿using System.IO;
+#if AVALONIA
+using Avalonia.Threading;
+#else
 using System.Windows.Threading;
+#endif
 
 namespace BloodborneLauncher.Core
 {
@@ -313,11 +317,18 @@ namespace BloodborneLauncher.Core
 
         private static void Dispatch(Action action)
         {
+#if AVALONIA
+            if (Dispatcher.UIThread.CheckAccess())
+                action();
+            else
+                Dispatcher.UIThread.Post(action);
+#else
             var dispatcher = System.Windows.Application.Current?.Dispatcher;
             if (dispatcher == null || dispatcher.CheckAccess())
                 action();
             else
                 dispatcher.BeginInvoke(action);
+#endif
         }
     }
 }
